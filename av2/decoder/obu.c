@@ -2675,6 +2675,15 @@ int avm_decode_frame_from_obus(struct AV2Decoder *pbi, const uint8_t *data,
     av2_init_read_bit_buffer(pbi, &rb, data, data + payload_size);
     switch (obu_header.type) {
       case OBU_TEMPORAL_DELIMITER:
+        // Reset per-TU state unconditionally for the current stream.
+        decoded_payload_size = read_temporal_delimiter_obu();
+        pbi->seen_frame_header = 0;
+        pbi->next_start_tile = 0;
+        pbi->seen_vcl_obu_in_this_tu = 0;
+        pbi->doh_tu_order_hint_bits_set = 0;
+        for (int i = 0; i < NUM_CUSTOM_QMS; i++) pbi->qm_protected[i] = 0;
+
+        // Propagate the reset to each active xlayer's saved context.
         for (int xlayer = 0; xlayer < AVM_MAX_NUM_STREAMS - 1; xlayer++) {
           if (pbi->xlayer_id_map[xlayer] > 0) {
             av2_store_xlayer_context(pbi, cm, cm->xlayer_id);
