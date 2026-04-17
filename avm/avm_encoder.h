@@ -1029,6 +1029,11 @@ typedef struct avm_codec_enc_cfg {
    */
   unsigned int kf_max_dist;
 
+  /*!\brief enable sframe
+   *
+   * Enalbe sframe
+   */
+  unsigned int enable_sframe;
   /*!\brief sframe interval
    *
    * This value, expressed as a number of frames, forces the encoder to code

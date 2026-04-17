@@ -104,6 +104,7 @@ typedef struct av2_codec_arg_definitions {
   arg_def_t kf_min_dist;
   arg_def_t kf_max_dist;
   arg_def_t kf_disabled;
+  arg_def_t enable_sframe;
   arg_def_t sframe_dist;
   arg_def_t sframe_mode;
   arg_def_t sframe_type;

@@ -208,12 +208,15 @@ const arg_def_t *rc_args[] = { &g_av2_codec_arg_defs.dropframe_thresh,
                                &g_av2_codec_arg_defs.maxsection_pct,
                                NULL };
 
-const arg_def_t *kf_args[] = {
-  &g_av2_codec_arg_defs.fwd_kf_enabled, &g_av2_codec_arg_defs.kf_min_dist,
-  &g_av2_codec_arg_defs.kf_max_dist,    &g_av2_codec_arg_defs.kf_disabled,
-  &g_av2_codec_arg_defs.sframe_dist,    &g_av2_codec_arg_defs.sframe_mode,
-  &g_av2_codec_arg_defs.sframe_type,    NULL
-};
+const arg_def_t *kf_args[] = { &g_av2_codec_arg_defs.fwd_kf_enabled,
+                               &g_av2_codec_arg_defs.kf_min_dist,
+                               &g_av2_codec_arg_defs.kf_max_dist,
+                               &g_av2_codec_arg_defs.kf_disabled,
+                               &g_av2_codec_arg_defs.enable_sframe,
+                               &g_av2_codec_arg_defs.sframe_dist,
+                               &g_av2_codec_arg_defs.sframe_mode,
+                               &g_av2_codec_arg_defs.sframe_type,
+                               NULL };
 
 // TODO(bohanli): Currently all options are supported by the key & value API.
 // Consider removing the control ID usages?
@@ -1154,6 +1157,8 @@ static int parse_stream_params(struct AvxEncoderConfig *global,
       config->cfg.kf_max_dist = arg_parse_uint(&arg);
     } else if (arg_match(&arg, &g_av2_codec_arg_defs.kf_disabled, argi)) {
       config->cfg.kf_mode = AVM_KF_DISABLED;
+    } else if (arg_match(&arg, &g_av2_codec_arg_defs.enable_sframe, argi)) {
+      config->cfg.enable_sframe = arg_parse_uint(&arg);
     } else if (arg_match(&arg, &g_av2_codec_arg_defs.sframe_dist, argi)) {
       config->cfg.sframe_dist = arg_parse_uint(&arg);
     } else if (arg_match(&arg, &g_av2_codec_arg_defs.sframe_mode, argi)) {

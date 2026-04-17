@@ -283,6 +283,7 @@ const av2_codec_arg_definitions_t g_av2_codec_arg_defs = {
   .kf_max_dist =
       ARG_DEF(NULL, "kf-max-dist", 1, "Maximum keyframe interval (frames)"),
   .kf_disabled = ARG_DEF(NULL, "disable-kf", 0, "Disable keyframe placement"),
+  .enable_sframe = ARG_DEF(NULL, "enable-sframe", 1, "Enable S-Frame"),
   .sframe_dist = ARG_DEF(NULL, "sframe-dist", 1, "S-Frame interval (frames)"),
   .sframe_mode =
       ARG_DEF(NULL, "sframe-mode", 1, "S-Frame insertion mode (0..2)"),

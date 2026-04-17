@@ -1519,6 +1519,7 @@ static avm_codec_err_t set_encoder_config(AV2EncoderConfig *oxcf,
       cfg->kf_mode == AVM_KF_AUTO && cfg->kf_min_dist != cfg->kf_max_dist;
   kf_cfg->key_freq_min = cfg->kf_min_dist;
   kf_cfg->key_freq_max = cfg->kf_max_dist;
+  kf_cfg->enable_sframe = cfg->enable_sframe;
   kf_cfg->sframe_dist = cfg->sframe_dist;
   kf_cfg->sframe_mode = cfg->sframe_mode;
   kf_cfg->sframe_type = cfg->sframe_type;
@@ -4768,6 +4769,7 @@ static const avm_codec_enc_cfg_t encoder_usage_cfg[] = { {
     AVM_KF_AUTO,                 // kf_mode
     0,                           // kf_min_dist
     9999,                        // kf_max_dist
+    0,                           // enable_sframe
     0,                           // sframe_dist
     1,                           // sframe_mode
     0,                           // sframe_type
