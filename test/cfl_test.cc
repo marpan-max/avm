@@ -473,6 +473,8 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::ValuesIn(av2_cfl_subsample_121_hbd_avx2_params));
 #endif
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(CflSubsample121HBDTest);
+
 #define ALL_CFL_TX_SIZES_COLOCATED(function)                 \
   make_tuple(static_cast<TX_SIZE>(TX_4X4), &function),       \
       make_tuple(static_cast<TX_SIZE>(TX_4X8), &function),   \
@@ -567,6 +569,8 @@ INSTANTIATE_TEST_SUITE_P(
     AVX2, CflSubsampleColocatedHBDTest,
     ::testing::ValuesIn(av2_cfl_subsample_colocated_hbd_avx2_params));
 #endif
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(CflSubsampleColocatedHBDTest);
 
 typedef void (*mhccp_predict_hv_hbd_fn)(const uint16_t *input, uint16_t *dst,
                                         bool have_top, bool have_left,
@@ -670,6 +674,8 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(0, 1, 2),
                        ::testing::Values(mhccp_predict_hv_hbd_avx2)));
 #endif  // HAVE_AVX2
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(MhccpPredictHVHBDTest);
 
 typedef void (*av2_mhccp_derive_multi_param_hv_fn)(
     MACROBLOCKD *const xd, int plane, int above_lines, int left_lines,
@@ -809,6 +815,8 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(8, 10, 12),        // bd
         ::testing::Values(av2_mhccp_derive_multi_param_hv_avx2)));
 #endif  // HAVE_AVX2
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(MhccpDeriveMultiParamHVTest);
 
 #if HAVE_SSE2
 const sub_avg_param sub_avg_sizes_sse2[] = { ALL_CFL_TX_SIZES(
@@ -1025,6 +1033,9 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(av2_mhccp_implicit_fetch_neighbor_chroma_avx2)));
 #endif  // HAVE_AVX2
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(
+    MhccpImplicitFetchNeighbourChromaTest);
+
 typedef void (*av2_mhccp_implicit_fetch_neighbor_luma_420_fn)(
     const uint16_t *input, int input_stride, int above_lines, int left_lines,
     int is_top_sb_boundary, int ref_width, int ref_height, int sub_y,
@@ -1161,5 +1172,8 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(8, 10, 12),         // bd
         ::testing::Values(av2_mhccp_implicit_fetch_neighbor_luma_420_avx2)));
 #endif  // HAVE_AVX2
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(
+    MhccpImplicitFetchNeighbourLumaTest);
 
 }  // namespace

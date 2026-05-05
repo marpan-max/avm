@@ -408,4 +408,8 @@ INSTANTIATE_TEST_SUITE_P(
                                              av2_get_rate_dist_lf_luma_avx2)));
 #endif  // HAVE_AVX2
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(TcqRateLumaTest);
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(TcqRateLfLumaTest);
+
 }  // namespace

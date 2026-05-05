@@ -1380,6 +1380,8 @@ INSTANTIATE_TEST_SUITE_P(AVX2, AV2ConvolveNonSep2DHighbdTest,
                          BuildHighbdParams(av2_convolve_symmetric_highbd_avx2));
 #endif
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(AV2ConvolveNonSep2DHighbdTest);
+
 class AV2ConvolveWienerNonSep2DHighbdTest
     : public AV2ConvolveNonSep2DHighbdTest {};
 
@@ -1396,6 +1398,9 @@ INSTANTIATE_TEST_SUITE_P(
     BuildHighbdParams(av2_convolve_symmetric_subtract_center_highbd_avx2));
 #endif
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(
+    AV2ConvolveWienerNonSep2DHighbdTest);
+
 class AV2ConvolveNonSepBlk8x82DHighbdTest
     : public AV2ConvolveNonSep2DHighbdTest {};
 
@@ -1411,6 +1416,9 @@ INSTANTIATE_TEST_SUITE_P(
     AVX2, AV2ConvolveNonSepBlk8x82DHighbdTest,
     BuildHighbdParams(av2_convolve_symmetric_blk8x8_highbd_avx2));
 #endif
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(
+    AV2ConvolveNonSepBlk8x82DHighbdTest);
 
 //////////////////////////////////////////////////////////
 // Nonseparable convolve-2d Dual functions (high bit-depth)
@@ -1632,6 +1640,9 @@ INSTANTIATE_TEST_SUITE_P(
     BuildHighbdParams(av2_convolve_symmetric_dual_subtract_center_highbd_avx2));
 #endif  // HAVE_AVX2
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(
+    AV2ConvolveNonSep_dual2DHighbdTest);
+
 /* Dual with subtract center off unit-test*/
 class AV2ConvolveDualWithoutsubtract2DHighbdTest
     : public AV2ConvolveNonSep_dual2DHighbdTest {};
@@ -1646,6 +1657,9 @@ INSTANTIATE_TEST_SUITE_P(
     AVX2, AV2ConvolveDualWithoutsubtract2DHighbdTest,
     BuildHighbdParams(av2_convolve_symmetric_dual_highbd_avx2));
 #endif
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(
+    AV2ConvolveDualWithoutsubtract2DHighbdTest);
 
 //////////////////////////////////////////////////////////
 // Unit-test corresponds to buffer accumulations to derive filter
@@ -1882,6 +1896,8 @@ INSTANTIATE_TEST_SUITE_P(
     BuildHighbdPCWienerParams(fill_directional_feature_buffers_highbd_avx2));
 #endif  // HAVE_AVX2
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(AV2FillDirFeatureBufHighbdTest);
+
 typedef void (*FillTSkipSumBufferFunc)(int row, const uint8_t *tskip,
                                        int tskip_stride,
                                        int8_t *tskip_sum_buffer, int width,
@@ -2032,6 +2048,8 @@ TEST_P(AV2Fill_TSkip_Sum_BufferTest, DISABLED_Speed) { RunSpeedTest(); }
 INSTANTIATE_TEST_SUITE_P(AVX2, AV2Fill_TSkip_Sum_BufferTest,
                          ::testing::Values(av2_fill_tskip_sum_buffer_avx2));
 #endif  // HAVE_AVX2
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(AV2Fill_TSkip_Sum_BufferTest);
 
 //////////////////////////////////////////////////////////
 //       unit-test for 'directional_feature_accum'      //
@@ -2195,6 +2213,8 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(av2_fill_directional_feature_accumulators_avx2));
 #endif  // HAVE_AVX2
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(AV2FeatureDirAccumHighbdTest);
+
 //////////////////////////////////////////////////////////
 //     unit-test for 'fill_tskip_feature_accumulator'   //
 //////////////////////////////////////////////////////////
@@ -2338,6 +2358,8 @@ INSTANTIATE_TEST_SUITE_P(
     AVX2, AV2TskipAccumHighbdTest,
     ::testing::Values(av2_fill_tskip_feature_accumulator_avx2));
 #endif  // HAVE_AVX2
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(AV2TskipAccumHighbdTest);
 
 //////////////////////////////////////////////////////////
 //     unit-test for 'calc_wieners_ds_luma'             //

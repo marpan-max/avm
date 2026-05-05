@@ -1658,4 +1658,9 @@ const SubpelAvgVarianceParams kArrayHBDSubpelAvgVariance_sse2[] = {
 INSTANTIATE_TEST_SUITE_P(SSE2, AvxHBDSubpelAvgVarianceTest,
                          ::testing::ValuesIn(kArrayHBDSubpelAvgVariance_sse2));
 #endif  // HAVE_SSE2
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(AvxSubpelVarianceTest);
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(AvxSubpelAvgVarianceTest);
+
 }  // namespace

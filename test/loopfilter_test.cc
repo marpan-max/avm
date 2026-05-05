@@ -314,4 +314,6 @@ const Params kLoopFilterTest[] = {
 INSTANTIATE_TEST_SUITE_P(SSE4_1, LoopFilterTest,
                          ::testing::ValuesIn(kLoopFilterTest));
 #endif  // HAVE_SSE4_1
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(LoopFilterTest);
 }  // namespace

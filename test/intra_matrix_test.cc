@@ -110,6 +110,8 @@ INSTANTIATE_TEST_SUITE_P(AVX2, IntraMatrixTestHB,
                              av2_dip_matrix_multiplication_avx2)));
 #endif  // HAVE_AVX2
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(IntraMatrixTestHB);
+
 // Speed tests
 
 TEST_P(IntraMatrixTestHB, DISABLED_Speed) {
@@ -296,3 +298,5 @@ INSTANTIATE_TEST_SUITE_P(AVX2, ResampleOutputTest,
                          ::testing::Values(ResampleOutputTestFuncs(
                              resample_output_c, resample_output_avx2)));
 #endif  // HAVE_AVX2
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(ResampleOutputTest);

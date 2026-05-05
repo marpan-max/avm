@@ -21,7 +21,6 @@ using std::tuple;
 
 namespace {
 
-#if HAVE_SSE4_1
 TEST_P(AV2HighbdWarpFilterTest, CheckOutput) {
   RunCheckOutput(std::get<4>(GET_PARAM(0)));
 }
@@ -29,6 +28,7 @@ TEST_P(AV2HighbdWarpFilterTest, DISABLED_Speed) {
   RunSpeedTest(std::get<4>(GET_PARAM(0)));
 }
 
+#if HAVE_SSE4_1
 INSTANTIATE_TEST_SUITE_P(SSE4_1, AV2HighbdWarpFilterTest,
                          libavm_test::AV2HighbdWarpFilter::BuildParams(
                              av2_highbd_warp_affine_sse4_1));
@@ -45,10 +45,14 @@ INSTANTIATE_TEST_SUITE_P(SSE4_1, AV2ExtHighbdWarpFilterTest,
                              av2_ext_highbd_warp_affine_sse4_1));
 #endif  // HAVE_SSE4_1
 
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(AV2ExtHighbdWarpFilterTest);
+
 #if HAVE_AVX2
 INSTANTIATE_TEST_SUITE_P(
     AVX2, AV2HighbdWarpFilterTest,
     libavm_test::AV2HighbdWarpFilter::BuildParams(av2_highbd_warp_affine_avx2));
 #endif  // HAVE_AVX2
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(AV2HighbdWarpFilterTest);
 
 }  // namespace
