@@ -215,6 +215,10 @@ static INLINE int prune_ref_by_selective_ref_frame(
   assert(ref_frame[0] != NONE_FRAME);
   if (ref_frame[0] == INTRA_FRAME) return 0;
 
+  // Prune for realtime coding.
+  if (sf->inter_sf.use_first_reference_only && ref_frame[0] > 0)
+    return 1;
+
   RefCntBuffer *ref0_buf = get_ref_frame_buf(cm, ref_frame[0]);
   if (ref0_buf)
     if (ref0_buf->is_restricted) return 1;

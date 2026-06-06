@@ -181,7 +181,10 @@ enum {
   SEARCH_PARTITION,
 
   // Always use a fixed size partition
-  FIXED_PARTITION
+  FIXED_PARTITION,
+
+  // Partition using source variance for realtime mode.
+  VAR_BASED_PARTITION
 } UENUM1BYTE(PARTITION_SEARCH_TYPE);
 
 enum {
@@ -433,6 +436,9 @@ typedef struct PARTITION_SPEED_FEATURES {
   int prune_split_ml_level_inter;
   int prune_none_with_ml;
 #endif  // CONFIG_ML_PART_SPLIT
+
+  // Use the av2_nonrd_use_paritition() instead of av2_rd_use_partition().
+  int use_nonrd_partition;
 } PARTITION_SPEED_FEATURES;
 
 typedef struct MV_SPEED_FEATURES {
@@ -528,6 +534,9 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // Has five levels for now: 0, 1, 2, 3 and 4, where higher levels prune more
   // aggressively than lower ones. (0 means no pruning).
   int selective_ref_frame;
+
+  // Drop all references except first one, used only for rt mode.
+  bool use_first_reference_only;
 
   // Prune reference frames.
   // 0 implies no pruning
@@ -711,6 +720,9 @@ typedef struct INTRA_MODE_SPEED_FEATURES {
   // flag to allow skipping intra mode for inter frame prediction
   int skip_intra_in_interframe;
 
+  // flag to disable all but DC intra mode for inter frame prediction.
+  bool use_only_dc_intra_interframe;
+
   // variance threshold for intra mode gating when inter turned out to be skip
   // in inter frame prediction
   unsigned int src_var_thresh_intra_skip;
@@ -868,6 +880,12 @@ typedef struct LOOP_FILTER_SPEED_FEATURES {
 
   // Number of refinement steps for WIENER_NONSEP tool
   int wienerns_refine_iters;
+
+  // Disable GDF.
+  int disable_gdf;
+
+  // Disable CCSO.
+  int disable_ccso;
 } LOOP_FILTER_SPEED_FEATURES;
 
 typedef struct FLEXMV_PRECISION_SPEED_FEATURES {

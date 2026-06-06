@@ -96,7 +96,9 @@ enum {
 enum {
   // Good Quality Fast Encoding. The encoder balances quality with the amount of
   // time it takes to encode the output. Speed setting controls how fast.
-  GOOD
+  GOOD,
+  // Realtime Fast Encoding.
+  REALTIME
 } UENUM1BYTE(MODE);
 
 enum {
@@ -1569,6 +1571,77 @@ typedef struct inter_modes_info {
   RdIdxPair rd_idx_pair_arr[MAX_INTER_MODES];
 } InterModesInfo;
 
+/*!\cond */
+typedef struct {
+  // This struct is used for computing variance in choose_partitioning(), where
+  // the max number of samples within a superblock is 32x32 (with 4x4 avg).
+  // With 8bit bitdepth, uint32_t is enough for sum_square_error (2^8 * 2^8 * 32
+  // * 32 = 2^26). For high bitdepth we need to consider changing this to 64 bit
+  uint32_t sum_square_error;
+  int32_t sum_error;
+  int log2_count;
+  int variance;
+} VPartVar;
+
+typedef struct {
+  VPartVar none;
+  VPartVar horz[2];
+  VPartVar vert[2];
+} VPVariance;
+
+typedef struct {
+  VPVariance part_variances;
+  VPartVar split[4];
+} VP4x4;
+
+typedef struct {
+  VPVariance part_variances;
+  VP4x4 split[4];
+} VP8x8;
+
+typedef struct {
+  VPVariance part_variances;
+  VP8x8 split[4];
+} VP16x16;
+
+typedef struct {
+  VPVariance part_variances;
+  VP16x16 split[4];
+} VP32x32;
+
+typedef struct {
+  VPVariance part_variances;
+  VP32x32 split[4];
+} VP64x64;
+
+typedef struct {
+  VPVariance part_variances;
+  VP64x64 *split;
+} VP128x128;
+
+/*!\endcond */
+
+/*!
+ * \brief Thresholds for variance based partitioning.
+ */
+typedef struct {
+  /*!
+   * If block variance > threshold, then that block is forced to split.
+   * thresholds[0] - threshold for 128x128;
+   * thresholds[1] - threshold for 64x64;
+   * thresholds[2] - threshold for 32x32;
+   * thresholds[3] - threshold for 16x16;
+   * thresholds[4] - threshold for 8x8;
+   */
+  int64_t thresholds[5];
+
+  /*!
+   * MinMax variance threshold for 8x8 sub blocks of a 16x16 block. If actual
+   * minmax > threshold_minmax, the 16x16 is forced to split.
+   */
+  int64_t threshold_minmax;
+} VarBasedPartitionInfo;
+
 /*!
  * \brief Encoder parameters for synchronization of row based multi-threading
  */
@@ -2720,6 +2793,11 @@ typedef struct AV2_COMP {
    * VARIANCE_AQ segment map refresh.
    */
   int vaq_refresh;
+
+  /*!
+   * Thresholds for variance based partitioning.
+   */
+  VarBasedPartitionInfo vbp_info;
 
   /*!
    * Probabilities for pruning of various AV2 tools.

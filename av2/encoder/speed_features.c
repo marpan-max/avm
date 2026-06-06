@@ -586,6 +586,26 @@ static void set_good_speed_features_framesize_independent(
   }
 }
 
+static void set_rt_speed_features_framesize_independent(
+    const AV2_COMP *const cpi, SPEED_FEATURES *const sf, int speed) {
+  // Set this good features as default for now.
+  set_good_speed_features_framesize_independent(cpi, sf, speed);
+  if (speed >= 6) {
+    // TODO(any, marpan): update speed features for realtime mode.
+    sf->part_sf.use_nonrd_partition = 0;
+    sf->part_sf.partition_search_type = VAR_BASED_PARTITION;
+    sf->hl_sf.frame_parameter_update = 0;
+    sf->hl_sf.recode_loop = DISALLOW_RECODE;
+    sf->lpf_sf.lpf_pick = LPF_PICK_FROM_Q;
+    sf->lpf_sf.cdef_pick_method = CDEF_PICK_FROM_Q;
+    sf->lpf_sf.disable_gdf = 1;
+    sf->lpf_sf.disable_ccso = 1;
+    sf->inter_sf.use_first_reference_only = true;
+    sf->intra_sf.use_only_dc_intra_interframe = true;
+    sf->inter_sf.prune_ref_frames = 0;
+  }
+}
+
 static AVM_INLINE void init_hl_sf(HIGH_LEVEL_SPEED_FEATURES *hl_sf) {
   // best quality defaults
   hl_sf->frame_parameter_update = 1;
@@ -661,6 +681,7 @@ static AVM_INLINE void init_part_sf(PARTITION_SPEED_FEATURES *part_sf) {
   part_sf->prune_split_ml_level = -2;  // default pruning
   part_sf->prune_split_ml_level_inter = -1;
 #endif  // CONFIG_ML_PART_SPLIT
+  part_sf->use_nonrd_partition = 0;
 }
 
 static AVM_INLINE void init_mv_sf(MV_SPEED_FEATURES *mv_sf) {
@@ -702,6 +723,7 @@ static AVM_INLINE void init_inter_sf(INTER_MODE_SPEED_FEATURES *inter_sf) {
   inter_sf->reduce_inter_modes = 0;
   inter_sf->alt_ref_search_fp = 0;
   inter_sf->selective_ref_frame = 0;
+  inter_sf->use_first_reference_only = false;
   inter_sf->prune_ref_frames = 0;
   inter_sf->disable_wedge_search_var_thresh = 0;
   inter_sf->fast_wedge_sign_estimate = 0;
@@ -753,6 +775,7 @@ static AVM_INLINE void init_intra_sf(INTRA_MODE_SPEED_FEATURES *intra_sf) {
   intra_sf->prune_palette_search_level = 0;
   intra_sf->reuse_uv_mode_rd_info = false;
   intra_sf->skip_intra_dip_search = false;
+  intra_sf->use_only_dc_intra_interframe = false;
 
   for (int i = 0; i < TX_SIZES; i++) {
     intra_sf->intra_y_mode_mask[i] = INTRA_ALL;
@@ -832,6 +855,8 @@ static AVM_INLINE void init_lpf_sf(LOOP_FILTER_SPEED_FEATURES *lpf_sf) {
   lpf_sf->cdef_pick_method = CDEF_FULL_SEARCH;
   lpf_sf->disable_lr_filter = 0;
   lpf_sf->wienerns_refine_iters = 2;
+  lpf_sf->disable_gdf = 0;
+  lpf_sf->disable_ccso = 0;
 }
 
 static void av2_disable_ml_based_transform_sf(TX_SPEED_FEATURES *const tx_sf) {
@@ -916,7 +941,7 @@ void av2_set_speed_features_framesize_dependent(AV2_COMP *cpi, int speed) {
   SPEED_FEATURES *const sf = &cpi->sf;
   const AV2EncoderConfig *const oxcf = &cpi->oxcf;
 
-  if (oxcf->mode == GOOD) {
+  if (oxcf->mode == GOOD || oxcf->mode == REALTIME) {
     set_good_speed_feature_framesize_dependent(cpi, sf, speed);
   }
 
@@ -1038,8 +1063,11 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
   init_lpf_sf(&sf->lpf_sf);
   init_flexmv_sf(&sf->flexmv_sf);
 
-  if (oxcf->mode == GOOD)
+  if (oxcf->mode == GOOD) {
     set_good_speed_features_framesize_independent(cpi, sf, speed);
+  } else if (oxcf->mode == REALTIME) {
+    set_rt_speed_features_framesize_independent(cpi, sf, speed);
+  }
 
   if (!cpi->seq_params_locked) {
     cpi->common.seq_params.enable_restoration &= !sf->lpf_sf.disable_lr_filter;

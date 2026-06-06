@@ -1200,6 +1200,12 @@ int av2_encode_strategy(AV2_COMP *const cpi, size_t *const size,
     const int64_t pts64 = ticks_to_timebase_units(timestamp_ratio, *time_stamp);
     if (pts64 < 0 || pts64 > UINT32_MAX) return AVM_CODEC_ERROR;
   }
+
+  if (has_no_stats_stage(cpi) && cpi->oxcf.gf_cfg.lag_in_frames == 0 &&
+      cpi->oxcf.mode == REALTIME) {
+    av2_get_one_pass_rt_params(cpi, &frame_params.frame_type, *frame_flags);
+  }
+
   FRAME_UPDATE_TYPE frame_update_type = get_frame_update_type(gf_group);
 
   if (cpi->oxcf.unit_test_cfg.multi_layers_lag_test &&

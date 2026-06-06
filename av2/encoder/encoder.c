@@ -3046,7 +3046,8 @@ static void cdef_restoration_frame(AV2_COMP *cpi, AV2_COMMON *cm,
   int ref_stride;
   const int use_ccso =
       !cm->features.coded_lossless && !cm->bru.frame_inactive_flag &&
-      !cm->bridge_frame_info.is_bridge_frame && cm->seq_params.enable_ccso;
+      !cm->bridge_frame_info.is_bridge_frame &&
+      cm->seq_params.enable_ccso && !cpi->sf.lpf_sf.disable_ccso;
   const int num_planes = av2_num_planes(cm);
   av2_setup_dst_planes(xd->plane, &cm->cur_frame->buf, 0, 0, 0, num_planes,
                        NULL);
@@ -3075,7 +3076,7 @@ static void cdef_restoration_frame(AV2_COMP *cpi, AV2_COMMON *cm,
     extend_ccso_border(&cm->cur_frame->buf, ext_rec_y, CCSO_PADDING_SIZE);
   }
 
-  use_gdf = (use_gdf & is_allow_gdf(cm));
+  use_gdf = (use_gdf & is_allow_gdf(cm) & !cpi->sf.lpf_sf.disable_gdf);
   if (!use_gdf) {
     cm->gdf_info.gdf_mode = 0;
   }

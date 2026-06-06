@@ -1311,9 +1311,11 @@ void av2_initialize_rd_consts(AV2_COMP *cpi) {
   av2_set_error_per_bit(mv_costs, rd->RDMULT);
 
   set_block_thresholds(cm, rd);
-
-  if ((cpi->oxcf.cost_upd_freq.mv != COST_UPD_OFF) || frame_is_intra_only(cm) ||
-      (cm->current_frame.frame_number & 0x07) == 1)
+  const int fill_costs = frame_is_intra_only(cm) ||
+                         (cpi->oxcf.mode == REALTIME
+                              ? cpi->rc.frames_since_key < 2
+                              : (cm->current_frame.frame_number & 0x07) == 1);
+  if ((cpi->oxcf.cost_upd_freq.mv != COST_UPD_OFF) || fill_costs)
     av2_fill_mv_costs(cm->fc, cm->features.cur_frame_force_integer_mv,
                       cm->features.fr_mv_precision, mv_costs);
 

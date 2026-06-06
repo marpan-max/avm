@@ -8487,7 +8487,8 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
             !is_warp_newmv_allowed(cm, xd, mbmi, bsize))
           continue;
 
-        init_submi(xd, cm, mi_row, mi_col, bsize);
+        if (cpi->oxcf.mode != REALTIME)
+          init_submi(xd, cm, mi_row, mi_col, bsize);
 
         set_mv_precision(mbmi, mbmi->max_mv_precision);
         if (is_pb_mv_precision_active(cm, mbmi, bsize))
@@ -8757,6 +8758,9 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
           if (!is_intra_mode_allowed) break;
           for (int mode_idx = INTRA_MODE_START; mode_idx < LUMA_MODE_COUNT;
                ++mode_idx) {
+            if (sf->intra_sf.use_only_dc_intra_interframe &&
+                mode_idx != DC_PRED)
+              continue;
             if (sf->intra_sf.skip_intra_in_interframe &&
                 search_state.intra_search_state.skip_intra_modes)
               break;
