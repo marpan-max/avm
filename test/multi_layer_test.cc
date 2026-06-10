@@ -88,8 +88,10 @@ class MultiLayerTest : public ::libavm_test::CodecTestWithParam<int>,
       // the encoder's DPB (missing TL1 refreshes). This divergence leads to
       // different reference ranking and motion vector scaling parameters,
       // causing decode failures. Thus, we must disable TMVP for these test
-      // cases.
-      if (enable_buffer_refresh_test_ && num_temporal_layers_ > 1) {
+      // cases which drop enhancement layer frames.
+      if (enable_buffer_refresh_test_ &&
+          (decode_base_only_ || drop_tl2_ || drop_sl2_ ||
+           start_decoding_tl1_ > 0)) {
         encoder->Control(AV2E_SET_ENABLE_REF_FRAME_MVS, 0);
         encoder->Control(AV2E_SET_ALLOW_REF_FRAME_MVS, 0);
       }
