@@ -2654,7 +2654,7 @@ void av2_nonrd_use_partition(AV2_COMP *cpi, ThreadData *td,
                     PARTITION_NONE, pc_tree->region_type,
                     pc_tree->sb_root_partition_info, bsize, ctx_none, best_rdc);
       encode_b(cpi, tile_data, td, tp, mi_row, mi_col, OUTPUT_ENABLED, subsize,
-               partition, pc_tree->none[pc_tree->region_type], &rate);
+               partition, ctx_none, &rate);
       break;
     case PARTITION_HORZ:
       pc_tree->horizontal[cur_region_type][0] = av2_alloc_pc_tree_node(
