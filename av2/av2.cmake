@@ -292,6 +292,8 @@ list(
   "${AVM_ROOT}/av2/encoder/intra_mode_search.h"
   "${AVM_ROOT}/av2/encoder/intra_mode_search_utils.h"
   "${AVM_ROOT}/av2/encoder/wedge_utils.c"
+  "${AVM_ROOT}/av2/encoder/var_based_part.c"
+  "${AVM_ROOT}/av2/encoder/var_based_part.h"
   "${AVM_ROOT}/av2/encoder/av2_noise_estimate.c"
   "${AVM_ROOT}/av2/encoder/av2_noise_estimate.h"
   "${AVM_ROOT}/third_party/fastfeat/fast.c"
