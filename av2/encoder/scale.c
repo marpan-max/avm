@@ -10,6 +10,7 @@
  * aomedia.org/license/patent-license/.
  */
 
+#include "av2/encoder/encode_strategy.h"
 #include "av2/encoder/encoder_alloc.h"
 #include "av2/encoder/random.h"
 #include "av2/encoder/scale.h"
@@ -176,8 +177,13 @@ void av2_setup_frame_size(AV2_COMP *cpi) {
   setup_frame_size_from_params(cpi, &rsz);
   AV2_COMMON *const cm = &cpi->common;
   CurrentFrame *const current_frame = &cm->current_frame;
-  av2_get_ref_frames(cm, current_frame->display_order_hint, 1, 0,
-                     cm->ref_frame_map_pairs);
+  if (cm->seq_params.enable_explicit_ref_frame_map || frame_is_sframe(cm)) {
+    av2_get_ref_frames_enc(cpi, current_frame->display_order_hint,
+                           cm->ref_frame_map_pairs);
+  } else {
+    av2_get_ref_frames(cm, current_frame->display_order_hint, 1, 0,
+                       cm->ref_frame_map_pairs);
+  }
   cm->ref_frame_flags = (1 << cpi->common.ref_frames_info.num_total_refs) - 1;
   cm->cur_frame->num_ref_frames = cm->ref_frames_info.num_total_refs;
 
