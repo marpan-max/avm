@@ -55,18 +55,166 @@ const SubGOPStepCfg *get_subgop_step(const GF_GROUP *const gf_group,
   return &subgop_cfg->step[index - offset];
 }
 
+// Derive the encoder reference frame mapping by ordering valid reference
+// frames in ascending order of temporal distance from the current frame.
+static void order_explicit_ref_frames_by_distance(
+    AV2_COMMON *const cm, int cur_frame_disp,
+    const RefFrameMapPair *ref_frame_map_pairs) {
+  RefScoreData scores[REF_FRAMES];
+  memset(scores, 0, REF_FRAMES * sizeof(*scores));
+  for (int i = 0; i < cm->seq_params.ref_frames; ++i) {
+    scores[i].score = INT_MAX;
+  }
+  for (int i = 0; i < INTER_REFS_PER_FRAME; ++i) {
+    cm->remapped_ref_idx_res_indep[i] = INVALID_IDX;
+    cm->remapped_ref_idx[i] = INVALID_IDX;
+  }
+  int remap_idx_sframe[REF_FRAMES] = { 0 };
+  int n_ranked = 0;
+  cm->ref_frames_info.num_restricted_ref = 0;
+
+  // Collect valid reference buffers and compute their temporal distance score.
+  for (int i = 0; i < cm->seq_params.ref_frames; ++i) {
+    const RefFrameMapPair cur_ref = ref_frame_map_pairs[i];
+    if (cur_ref.ref_frame_restricted == 1) {
+      // Track restricted reference frames separately to append after
+      // unrestricted references.
+      if (!(cm->bridge_frame_info.is_bridge_frame &&
+            i != cm->bridge_frame_info.bridge_frame_ref_idx)) {
+        remap_idx_sframe[cm->ref_frames_info.num_restricted_ref] = i;
+        cm->ref_frames_info.num_restricted_ref++;
+      }
+      continue;
+    }
+    if (cur_ref.ref_frame_for_inference == -1) continue;
+    // Skip reference frames with invalid resolution ratios relative to the
+    // current frame.
+    if (!valid_ref_frame_size(cur_ref.width, cur_ref.height, cm->width,
+                              cm->height))
+      continue;
+
+    const int ref_disp = cur_ref.disp_order;
+    const int cur_mlayer_id = cm->current_frame.mlayer_id;
+    const int ref_mlayer_id = cur_ref.mlayer_id;
+    const int cur_tlayer_id = cm->current_frame.tlayer_id;
+    const int ref_tlayer_id = cur_ref.tlayer_id;
+    if (!is_tlayer_scalable_and_dependent(&cm->seq_params, cur_tlayer_id,
+                                          ref_tlayer_id, cur_mlayer_id) ||
+        !is_mlayer_scalable_and_dependent(&cm->seq_params, cur_mlayer_id,
+                                          ref_mlayer_id))
+      continue;
+
+    const int disp_diff = get_relative_dist(&cm->seq_params.order_hint_info,
+                                            cur_frame_disp, ref_disp);
+    const int res_ratio_log2 = -get_msb(cur_ref.width * cur_ref.height);
+    // Skip duplicate references with the same display order, layer, and
+    // resolution.
+    int is_duplicate = 0;
+    for (int j = 0; j < n_ranked; ++j) {
+      if (scores[j].disp_order == ref_disp &&
+          scores[j].mlayer_id == ref_mlayer_id &&
+          scores[j].res_ratio_log2 == res_ratio_log2) {
+        is_duplicate = 1;
+        break;
+      }
+    }
+    if (is_duplicate) continue;
+
+    scores[n_ranked].index = i;
+    // Score by temporal distance: prioritize past references (disp_diff > 0)
+    // in ascending distance order, followed by current/future references.
+    scores[n_ranked].score =
+        disp_diff > 0 ? disp_diff : MAX_FRAME_DISTANCE - disp_diff;
+    scores[n_ranked].distance = disp_diff;
+    scores[n_ranked].disp_order = ref_disp;
+    scores[n_ranked].base_qindex = cur_ref.base_qindex;
+    scores[n_ranked].mlayer_id = ref_mlayer_id;
+    scores[n_ranked].res_ratio_log2 = res_ratio_log2;
+    n_ranked++;
+  }
+
+  // Sort valid references in ascending order of temporal distance score.
+  for (int i = n_ranked - 1; i > 0; --i) {
+    for (int j = 0; j < i; ++j) {
+      if (scores[j].score > scores[j + 1].score) {
+        const RefScoreData tmp = scores[j];
+        scores[j] = scores[j + 1];
+        scores[j + 1] = tmp;
+      }
+    }
+  }
+
+  // Populate remapped_ref_idx and reference distance info for unrestricted
+  // references.
+  const int max_num_ref_frames =
+      AVMMIN(cm->seq_params.ref_frames, INTER_REFS_PER_FRAME);
+  cm->ref_frames_info.num_total_refs = AVMMIN(n_ranked, max_num_ref_frames);
+  cm->ref_frames_info.num_total_refs_res_indep =
+      cm->ref_frames_info.num_total_refs;
+  int bridge_frame_ref_idx_remapped_found = 0;
+  for (int i = 0; i < cm->ref_frames_info.num_total_refs; ++i) {
+    cm->remapped_ref_idx_res_indep[i] = scores[i].index;
+    cm->remapped_ref_idx[i] = scores[i].index;
+    cm->ref_frames_info.ref_frame_distance[i] = scores[i].distance;
+    if (cm->bridge_frame_info.is_bridge_frame &&
+        !bridge_frame_ref_idx_remapped_found &&
+        cm->remapped_ref_idx[i] == cm->bridge_frame_info.bridge_frame_ref_idx) {
+      cm->bridge_frame_info.bridge_frame_ref_idx_remapped = i;
+      bridge_frame_ref_idx_remapped_found = 1;
+    }
+  }
+
+  // Append restricted reference frames to any remaining reference slots.
+  for (int i = 0; i < cm->ref_frames_info.num_restricted_ref; ++i) {
+    if (i + cm->ref_frames_info.num_total_refs >= INTER_REFS_PER_FRAME) break;
+    cm->remapped_ref_idx[i + cm->ref_frames_info.num_total_refs] =
+        remap_idx_sframe[i];
+    cm->ref_frames_info
+        .ref_frame_distance[i + cm->ref_frames_info.num_total_refs] = INT_MAX;
+  }
+
+  // Update past, future, and current reference frame lists and BRU scores.
+  av2_get_past_future_cur_ref_lists(cm, scores);
+
+  cm->bru.ref_n_ranked = n_ranked;
+  if (n_ranked > 0) {
+    memcpy(cm->bru.ref_scores, scores, REF_FRAMES * sizeof(*scores));
+  }
+
+  // Fill any unused reference slots with the closest reference index.
+  for (int i = 0; i < INTER_REFS_PER_FRAME; ++i) {
+    if (cm->remapped_ref_idx[i] == INVALID_IDX)
+      cm->remapped_ref_idx[i] = scores[0].index;
+    if (cm->remapped_ref_idx_res_indep[i] == INVALID_IDX)
+      cm->remapped_ref_idx_res_indep[i] = scores[0].index;
+  }
+
+  cm->ref_frames_info.num_valid_refs_without_restricted_ref =
+      cm->ref_frames_info.num_total_refs;
+  cm->ref_frames_info.num_valid_refs_with_restricted_ref =
+      AVMMIN(cm->ref_frames_info.num_total_refs +
+                 cm->ref_frames_info.num_restricted_ref,
+             max_num_ref_frames);
+  cm->ref_frames_info.num_total_refs =
+      cm->ref_frames_info.num_valid_refs_with_restricted_ref;
+}
+
 void av2_get_ref_frames_enc(AV2_COMP *const cpi, int cur_frame_disp,
                             RefFrameMapPair *ref_frame_map_pairs) {
   AV2_COMMON *const cm = &cpi->common;
   assert(cm->seq_params.enable_explicit_ref_frame_map || frame_is_sframe(cm));
   // With explicit_ref_frame_map or is_ras_frame on, an encoder-only
-  // ranking scheme can be implemented here. For now, av2_get_ref_frames is used
-  // as a placeholder.
+  // ranking scheme can be implemented here. In non-realtime mode,
+  // av2_get_ref_frames is still used.
   // Do a dry run to obtain variables in resolution independent reference
   // mapping that will be used in write_frame_size_with_refs
   if (cpi->is_ras_frame == 1) {
     av2_get_ref_frames(cm, cur_frame_disp, 0, 1, ref_frame_map_pairs);
     av2_get_ref_frames(cm, cur_frame_disp, 1, 1, ref_frame_map_pairs);
+  } else if (cm->seq_params.enable_explicit_ref_frame_map &&
+             !frame_is_sframe(cm) && cpi->oxcf.mode == REALTIME) {
+    order_explicit_ref_frames_by_distance(cm, cur_frame_disp,
+                                          ref_frame_map_pairs);
   } else {
     av2_get_ref_frames(cm, cur_frame_disp, 0, 0, ref_frame_map_pairs);
     av2_get_ref_frames(cm, cur_frame_disp, 1, 0, ref_frame_map_pairs);
