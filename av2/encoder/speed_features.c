@@ -780,6 +780,8 @@ static void set_rt_speed_features_framesize_independent(
     sf->inter_sf.prune_ref_frames = 3;
     sf->intra_sf.intra_pruning_with_mlp = 0;
     sf->hl_sf.frame_parameter_update = 0;
+    sf->hl_sf.disable_primary_ref_frame_search =
+        cpi->common.seq_params.enable_explicit_ref_frame_map;
     sf->hl_sf.recode_loop = DISALLOW_RECODE;
     sf->lpf_sf.lpf_pick = LPF_PICK_FROM_Q;
     sf->lpf_sf.cdef_pick_method = CDEF_FAST_SEARCH_LVL3;
@@ -804,6 +806,7 @@ static void set_rt_speed_features_framesize_independent(
 static AVM_INLINE void init_hl_sf(HIGH_LEVEL_SPEED_FEATURES *hl_sf) {
   // best quality defaults
   hl_sf->frame_parameter_update = 1;
+  hl_sf->disable_primary_ref_frame_search = 0;
   hl_sf->recode_loop = ALLOW_RECODE;
   hl_sf->disable_unequal_scale_refs = false;
   // Recode loop tolerance %.

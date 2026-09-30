@@ -232,6 +232,10 @@ typedef struct HIGH_LEVEL_SPEED_FEATURES {
    * disallow references at different scale
    */
   bool disable_unequal_scale_refs;
+
+  // Disable searching for the best primary_ref_frame by trial-packing the
+  // bitstream across candidate reference frames.
+  int disable_primary_ref_frame_search;
   /*!\endcond */
 } HIGH_LEVEL_SPEED_FEATURES;
 
