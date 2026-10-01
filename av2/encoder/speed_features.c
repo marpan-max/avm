@@ -767,9 +767,17 @@ static void set_rt_speed_features_framesize_independent(
     sf->winner_mode_sf.tx_size_search_level = USE_FAST_RD;
     sf->tx_sf.restrict_tx_partition_type_search = 3;
     sf->tx_sf.enable_tx_partition = true;
+    if (cpi->oxcf.rc_cfg.mode == AVM_CBR) {
+      sf->rt_sf.check_scene_detection = 1;
+    }
     sf->intra_sf.skip_intra_in_interframe = 2;
     sf->rt_sf.prune_intra_mode_in_interframe = 2;
-    if (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN) {
+    if (sf->rt_sf.check_scene_detection) {
+      if (cpi->rc.high_source_sad) {
+        sf->intra_sf.skip_intra_in_interframe = 1;
+        sf->rt_sf.prune_intra_mode_in_interframe = 1;
+      }
+    } else if (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN) {
       sf->intra_sf.skip_intra_in_interframe = 1;
       sf->rt_sf.prune_intra_mode_in_interframe = 1;
     }
@@ -1100,6 +1108,7 @@ static AVM_INLINE void init_rt_sf(REALTIME_SPEED_FEATURES *rt_sf) {
   rt_sf->prune_intra_mode_in_interframe = 0;
   rt_sf->source_metrics_sb = 0;
   rt_sf->disable_primary_ref_frame_search = 0;
+  rt_sf->check_scene_detection = 0;
 }
 
 static AVM_INLINE void set_erp_speed_features_framesize_dependent(

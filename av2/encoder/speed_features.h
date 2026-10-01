@@ -1144,6 +1144,9 @@ typedef struct REALTIME_SPEED_FEATURES {
   // Disable searching for the best primary_ref_frame by trial-packing the
   // bitstream across candidate reference frames.
   int disable_primary_ref_frame_search;
+
+  // Check for scene/content change detection on every frame before encoding.
+  int check_scene_detection;
 } REALTIME_SPEED_FEATURES;
 
 typedef struct LC_DEC_SPEED_FEATURES {

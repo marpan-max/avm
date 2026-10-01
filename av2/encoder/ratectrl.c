@@ -324,6 +324,15 @@ void av2_rc_init(const AV2EncoderConfig *oxcf, RATE_CONTROL *rc) {
   rc->this_key_frame_forced = 0;
   rc->next_key_frame_forced = 0;
 
+  rc->high_source_sad = 0;
+  rc->avg_source_sad = 0;
+  rc->prev_avg_source_sad = 0;
+  rc->frame_source_sad = 0;
+  rc->rc_1_frame = 0;
+  rc->rc_2_frame = 0;
+  rc->q_1_frame = 0;
+  rc->q_2_frame = 0;
+
   rc->frames_till_gf_update_due = 0;
   rc->ni_frames = 0;
 
@@ -394,7 +403,14 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
   const AV2_COMMON *const cm = &cpi->common;
   const GF_GROUP *const gf_group = &cpi->gf_group;
   const int level = gf_group->layer_depth[gf_group->index];
-  const int max_delta = 16;
+  const bool is_screen = cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN;
+  const bool overshoot_buffer_low =
+      (!is_screen && rc->rc_1_frame == -1 &&
+       (!cpi->sf.rt_sf.check_scene_detection || rc->frame_source_sad > 1000) &&
+       rc->buffer_level < (rc->optimal_buffer_level >> 1) &&
+       rc->frames_since_key > 4);
+  const int max_delta_down = is_screen ? 16 : clamp(rc->q_1_frame / 8, 1, 16);
+  const int max_delta_up = overshoot_buffer_low ? 120 : 16;
   const int change_avg_frame_bandwidth =
       abs(rc->avg_frame_bandwidth - rc->prev_avg_frame_bandwidth) >
       0.1 * (rc->avg_frame_bandwidth);
@@ -406,19 +422,48 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
        cm->height != cm->prev_frame->height || change_avg_frame_bandwidth);
   // Apply some control/clamp to QP under certain conditions.
   if (cm->current_frame.frame_type != KEY_FRAME && rc->frames_since_key > 1 &&
-      !change_target_bits_mb &&
+      rc->q_1_frame > 0 && rc->q_2_frame > 0 && !change_target_bits_mb &&
       (!cpi->oxcf.rc_cfg.gf_cbr_boost_pct || (level > 1))) {
-    // Make sure q is between oscillating Qs to prevent resonance.
+    // If in the previous two frames we have seen both overshoot and undershoot
+    // clamp Q between the two.
     if (rc->rc_1_frame * rc->rc_2_frame == -1 &&
-        rc->q_1_frame != rc->q_2_frame) {
-      q = clamp(q, AVMMIN(rc->q_1_frame, rc->q_2_frame),
-                AVMMAX(rc->q_1_frame, rc->q_2_frame));
+        rc->q_1_frame != rc->q_2_frame && !overshoot_buffer_low) {
+      int qclamp = clamp(q, AVMMIN(rc->q_1_frame, rc->q_2_frame),
+                         AVMMAX(rc->q_1_frame, rc->q_2_frame));
+      if (!is_screen && rc->rc_1_frame == -1 && q > qclamp &&
+          rc->frames_since_key > 10)
+        q = (q + qclamp) >> 1;
+      else
+        q = qclamp;
+    }
+    // Adjust Q based on source content change from scene detection.
+    if (!is_screen && cpi->sf.rt_sf.check_scene_detection &&
+        rc->prev_avg_source_sad > 0 && rc->frames_since_key > 10 &&
+        rc->frame_source_sad > 0) {
+      const int bit_depth = cm->seq_params.bit_depth;
+      const double delta =
+          (double)rc->avg_source_sad / (double)rc->prev_avg_source_sad - 1.0;
+      // Push Q downwards if content change is decreasing and buffer level
+      // is stable (at least 1/4-optimal level), so not overshooting. Do so
+      // only for high Q to avoid excess overshoot.
+      if (delta < 0.0 && rc->buffer_level > (rc->optimal_buffer_level >> 2) &&
+          q > (rc->worst_quality >> 1)) {
+        const double q_adj_factor = 1.0 + 0.5 * tanh(4.0 * delta);
+        const double q_val = av2_convert_qindex_to_q(q, bit_depth);
+        q += av2_compute_qdelta(rc, q_val, q_val * q_adj_factor, bit_depth);
+      } else if (rc->q_1_frame - q > 0 && delta > 0.1 &&
+                 rc->buffer_level < AVMMIN(rc->maximum_buffer_size,
+                                           rc->optimal_buffer_level << 1)) {
+        q = (3 * q + rc->q_1_frame) >> 2;
+      }
     }
     // Limit the decrease in Q from previous frame.
-    if (rc->q_1_frame - q > max_delta) q = rc->q_1_frame - max_delta;
-    if (rc->buffer_level > (rc->optimal_buffer_level >> 3) &&
-        q - rc->q_1_frame > max_delta)
-      q = rc->q_1_frame + max_delta;
+    if (rc->q_1_frame - q > max_delta_down)
+      q = rc->q_1_frame - max_delta_down;
+    else if ((!is_screen ||
+              rc->buffer_level > (rc->optimal_buffer_level >> 3)) &&
+             q - rc->q_1_frame > max_delta_up)
+      q = rc->q_1_frame + max_delta_up;
   }
   // For single spatial layer: if resolution has increased push q closer
   // to the active_worst to avoid excess overshoot.
@@ -551,6 +596,7 @@ void av2_rc_update_rate_correction_factors(AV2_COMP *cpi, int width,
         rate_correction_factor, cm->seq_params.bit_depth,
         cpi->is_screen_content_type);
   }
+
   // Work out a size correction factor.
   if (projected_size_based_on_q > FRAME_OVERHEAD_BITS)
     correction_factor = (int)((100 * (int64_t)cpi->rc.projected_frame_size) /
@@ -798,10 +844,15 @@ static int calc_active_worst_quality_no_stats_cbr(const AV2_COMP *cpi) {
                    ? AVMMIN(rc->avg_frame_qindex[INTER_FRAME],
                             rc->avg_frame_qindex[KEY_FRAME])
                    : rc->avg_frame_qindex[INTER_FRAME];
-  active_worst_quality = AVMMIN(rc->worst_quality, ambient_qp * 5 / 4);
+  const bool is_screen = (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN);
+  ambient_qp = AVMMIN(rc->worst_quality, ambient_qp);
+
   if (rc->buffer_level > rc->optimal_buffer_level) {
     // Adjust down.
-    int max_adjustment_down = (active_worst_quality - rc->best_quality) / 2;
+    active_worst_quality = AVMMIN(rc->worst_quality, ambient_qp * 5 / 4);
+    int max_adjustment_down =
+        is_screen ? (active_worst_quality - rc->best_quality) / 2
+                  : active_worst_quality / 3;
     if (max_adjustment_down) {
       buff_lvl_step = ((rc->maximum_buffer_size - rc->optimal_buffer_level) /
                        max_adjustment_down);
@@ -812,16 +863,18 @@ static int calc_active_worst_quality_no_stats_cbr(const AV2_COMP *cpi) {
     }
   } else if (rc->buffer_level > critical_level) {
     // Adjust up from ambient Q.
+    active_worst_quality = AVMMIN(rc->worst_quality, ambient_qp);
     if (critical_level) {
       buff_lvl_step = (rc->optimal_buffer_level - critical_level);
       if (buff_lvl_step) {
         int max_adjustment_up =
-            AVMMIN(32, (rc->worst_quality - ambient_qp) / 2);
+            is_screen ? AVMMIN(32, (rc->worst_quality - ambient_qp) / 2)
+                      : (rc->worst_quality - ambient_qp);
         adjustment = (int)(max_adjustment_up *
                            (rc->optimal_buffer_level - rc->buffer_level) /
                            buff_lvl_step);
       }
-      active_worst_quality = ambient_qp + adjustment;
+      active_worst_quality += adjustment;
     }
   } else {
     // Set to worst_quality if buffer is below critical level.
@@ -916,6 +969,7 @@ static int calc_active_best_quality_no_stats_cbr(const AV2_COMP *cpi,
  *
  * \ingroup rate_control
  * \param[in]       cpi          Top level encoder structure
+ * \param[in,out]   rc           Rate control structure
  * \param[in]       width        Coded frame width
  * \param[in]       height       Coded frame height
  * \param[out]      bottom_index Bottom bound for q index (best quality)
@@ -2137,7 +2191,77 @@ static inline int set_key_frame(AV2_COMP *cpi, unsigned int frame_flags) {
   return 0;
 }
 
+void av2_rc_scene_detection_onepass_rt(AV2_COMP *cpi,
+                                       const EncodeFrameInput *frame_input) {
+  const AV2_COMMON *const cm = &cpi->common;
+  RATE_CONTROL *const rc = &cpi->rc;
+  rc->high_source_sad = 0;
+  const YV12_BUFFER_CONFIG *const unscaled_src = frame_input->source;
+  const YV12_BUFFER_CONFIG *const unscaled_last_src = frame_input->last_source;
+  if (unscaled_src == NULL || unscaled_last_src == NULL) return;
+  const int src_width = unscaled_src->y_width;
+  const int src_height = unscaled_src->y_height;
+  const int last_src_width = unscaled_last_src->y_width;
+  const int last_src_height = unscaled_last_src->y_height;
+  if (src_width != last_src_width || src_height != last_src_height) {
+    return;
+  }
+  const uint16_t *src_y = unscaled_src->y_buffer;
+  const int src_ystride = unscaled_src->y_stride;
+  const uint16_t *last_src_y = unscaled_last_src->y_buffer;
+  const int last_src_stride = unscaled_last_src->y_stride;
+
+  int num_zero_temp_sad = 0;
+  const bool is_screen = (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN);
+  const int bd_shift = cm->seq_params.bit_depth - 8;
+  uint32_t min_thresh = is_screen ? 8000 : 30000;
+  min_thresh <<= bd_shift;
+  const int thresh =
+      ((cm->width * cm->height <= 320 * 240 && cpi->framerate < 10.0) ||
+       is_screen)
+          ? 5
+          : 6;
+  const BLOCK_SIZE bsize = BLOCK_64X64;
+  uint64_t avg_sad = 0;
+  uint64_t tmp_sad = 0;
+  int num_samples = 0;
+
+  const int sb_cols = AVMMAX(1, cm->width >> 6);
+  const int sb_rows = AVMMAX(1, cm->height >> 6);
+
+  for (int sbi_row = 0; sbi_row < sb_rows; ++sbi_row) {
+    for (int sbi_col = 0; sbi_col < sb_cols; ++sbi_col) {
+      tmp_sad = cpi->fn_ptr[bsize].sdf(src_y, src_ystride, last_src_y,
+                                       last_src_stride);
+      avg_sad += tmp_sad;
+      num_samples++;
+      if (tmp_sad == 0) num_zero_temp_sad++;
+
+      src_y += 64;
+      last_src_y += 64;
+    }
+    src_y += (src_ystride << 6) - (sb_cols << 6);
+    last_src_y += (last_src_stride << 6) - (sb_cols << 6);
+  }
+
+  if (num_samples > 0) avg_sad = avg_sad / num_samples;
+  const int thresh_zero_sad_samples =
+      avg_sad > 8 * min_thresh ? 3 * (num_samples >> 2) : num_samples >> 1;
+  if (avg_sad >
+          AVMMAX(min_thresh, (unsigned int)(rc->avg_source_sad * thresh)) &&
+      rc->frames_since_key > 10 &&
+      num_zero_temp_sad < thresh_zero_sad_samples) {
+    rc->high_source_sad = 1;
+  } else {
+    rc->high_source_sad = 0;
+  }
+  rc->prev_avg_source_sad = rc->avg_source_sad;
+  rc->avg_source_sad = (3 * rc->avg_source_sad + avg_sad) >> 2;
+  rc->frame_source_sad = avg_sad;
+}
+
 void av2_get_one_pass_rt_params(AV2_COMP *cpi, FRAME_TYPE *const frame_type,
+                                const EncodeFrameInput *frame_input,
                                 unsigned int frame_flags) {
   RATE_CONTROL *const rc = &cpi->rc;
   AV2_COMMON *const cm = &cpi->common;
@@ -2145,6 +2269,7 @@ void av2_get_one_pass_rt_params(AV2_COMP *cpi, FRAME_TYPE *const frame_type,
   cpi->gf_group.size = 1;
   GF_GROUP *const gf_group = &cpi->gf_group;
   int target;
+  rc->high_source_sad = 0;
   // Set frame type.
   if (set_key_frame(cpi, frame_flags)) {
     *frame_type = KEY_FRAME;
@@ -2156,6 +2281,10 @@ void av2_get_one_pass_rt_params(AV2_COMP *cpi, FRAME_TYPE *const frame_type,
   } else {
     *frame_type = INTER_FRAME;
     gf_group->update_type[gf_group->index] = LF_UPDATE;
+    if (cpi->oxcf.rc_cfg.mode == AVM_CBR &&
+        cpi->sf.rt_sf.check_scene_detection) {
+      av2_rc_scene_detection_onepass_rt(cpi, frame_input);
+    }
   }
   // Set target size.
   if (cpi->oxcf.rc_cfg.mode == AVM_CBR) {
@@ -2176,4 +2305,27 @@ void av2_get_one_pass_rt_params(AV2_COMP *cpi, FRAME_TYPE *const frame_type,
   av2_rc_set_frame_target(cpi, target, cm->width, cm->height);
   rc->base_frame_target = target;
   cm->current_frame.frame_type = *frame_type;
+}
+
+int av2_encodedframe_overshoot_cbr(AV2_COMP *cpi, int *q) {
+  AV2_COMMON *const cm = &cpi->common;
+  RATE_CONTROL *const rc = &cpi->rc;
+  const int max_qp = AVMMIN(rc->worst_quality, 180);
+  if (*q >= max_qp) return 0;
+  const uint64_t sad_thr = 64 * 64 * 32;
+  if (cm->width * cm->height >= 1280 * 720 &&
+      (rc->buffer_level > (rc->optimal_buffer_level >> 1)) &&
+      rc->avg_source_sad < sad_thr) {
+    *q = (*q + max_qp) >> 1;
+  } else {
+    *q = (3 * max_qp + *q) >> 2;
+  }
+  // Adjust avg_frame_qindex, buffer_level, and rate under/over-shoot flags,
+  // as these parameters will affect QP selection for subsequent frames.
+  rc->avg_frame_qindex[INTER_FRAME] = *q;
+  rc->buffer_level = rc->optimal_buffer_level;
+  rc->bits_off_target = rc->optimal_buffer_level;
+  rc->rc_1_frame = 0;
+  rc->rc_2_frame = 0;
+  return 1;
 }
