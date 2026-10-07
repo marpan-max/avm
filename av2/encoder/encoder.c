@@ -3091,9 +3091,13 @@ static void cdef_restoration_frame(AV2_COMP *cpi, AV2_COMMON *cm,
                                    MACROBLOCKD *xd, int use_restoration,
                                    int use_cdef, int use_gdf) {
   uint16_t *ext_rec_y = NULL;
-  const int use_ccso =
-      !cm->features.coded_lossless && !cm->bru.frame_inactive_flag &&
-      !cm->bridge_frame_info.is_bridge_frame && cm->seq_params.enable_ccso;
+  const bool skip_lpf = cpi->sf.rt_sf.skip_loopfilter_static_frame &&
+                        !frame_is_intra_only(cm) &&
+                        cpi->rc.frame_source_sad == 0;
+  const int use_ccso = !cm->features.coded_lossless &&
+                       !cm->bru.frame_inactive_flag &&
+                       !cm->bridge_frame_info.is_bridge_frame &&
+                       cm->seq_params.enable_ccso && !skip_lpf;
   const int num_planes = av2_num_planes(cm);
 
   av2_setup_dst_planes(xd->plane, &cm->cur_frame->buf, 0, 0, 0, num_planes,
@@ -3369,18 +3373,24 @@ static void loopfilter_frame(AV2_COMP *cpi, AV2_COMMON *cm) {
   assert(IMPLIES(is_lossless_requested(&cpi->oxcf.rc_cfg),
                  cm->features.coded_lossless && cm->features.all_lossless));
 
+  const bool skip_lpf = cpi->sf.rt_sf.skip_loopfilter_static_frame &&
+                        !frame_is_intra_only(cm) &&
+                        cpi->rc.frame_source_sad == 0;
   const int use_loopfilter = !cm->features.coded_lossless &&
                              !cm->bru.frame_inactive_flag &&
-                             cpi->oxcf.tool_cfg.enable_deblocking;
-  const int use_cdef =
-      cm->seq_params.enable_cdef && !cm->bru.frame_inactive_flag &&
-      !cm->bridge_frame_info.is_bridge_frame && !cm->features.coded_lossless;
-  const int use_gdf =
-      cm->seq_params.enable_gdf && !cm->bru.frame_inactive_flag &&
-      !cm->bridge_frame_info.is_bridge_frame && !cm->features.all_lossless;
-  const int use_restoration =
-      cm->seq_params.enable_restoration && !cm->bru.frame_inactive_flag &&
-      !cm->bridge_frame_info.is_bridge_frame && !cm->features.all_lossless;
+                             cpi->oxcf.tool_cfg.enable_deblocking && !skip_lpf;
+  const int use_cdef = cm->seq_params.enable_cdef &&
+                       !cm->bru.frame_inactive_flag &&
+                       !cm->bridge_frame_info.is_bridge_frame &&
+                       !cm->features.coded_lossless && !skip_lpf;
+  const int use_gdf = cm->seq_params.enable_gdf &&
+                      !cm->bru.frame_inactive_flag &&
+                      !cm->bridge_frame_info.is_bridge_frame &&
+                      !cm->features.all_lossless && !skip_lpf;
+  const int use_restoration = cm->seq_params.enable_restoration &&
+                              !cm->bru.frame_inactive_flag &&
+                              !cm->bridge_frame_info.is_bridge_frame &&
+                              !cm->features.all_lossless && !skip_lpf;
 
   struct loopfilter *lf = &cm->lf;
 
@@ -3393,6 +3403,8 @@ static void loopfilter_frame(AV2_COMP *cpi, AV2_COMMON *cm) {
   } else {
     lf->apply_deblocking_filter[0] = 0;
     lf->apply_deblocking_filter[1] = 0;
+    lf->apply_deblocking_filter_u = 0;
+    lf->apply_deblocking_filter_v = 0;
   }
   cpi->cur_mfh_params.mfh_apply_deblocking_filter[0] =
       lf->apply_deblocking_filter[0];

@@ -188,6 +188,7 @@ typedef struct {
   int sframe_due;
 
   int high_source_sad;
+  int frames_since_scene_change;
   uint64_t avg_source_sad;
   uint64_t prev_avg_source_sad;
   uint64_t frame_source_sad;

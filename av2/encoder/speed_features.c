@@ -803,6 +803,13 @@ static void set_rt_speed_features_framesize_independent(
     if (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN) {
       sf->intra_sf.skip_intra_in_interframe = 1;
       sf->rt_sf.prune_intra_mode_in_interframe = 1;
+      sf->rt_sf.check_scene_detection = 1;
+      if (cpi->common.current_frame.frame_type != KEY_FRAME) {
+        sf->rt_sf.skip_loopfilter_static_frame = 1;
+        if (cpi->oxcf.rc_cfg.mode == AVM_CBR) {
+          sf->rt_sf.reorder_refs_on_scene_change = 1;
+        }
+      }
     }
   }
 }
@@ -1140,6 +1147,8 @@ static AVM_INLINE void init_rt_sf(REALTIME_SPEED_FEATURES *rt_sf) {
   rt_sf->disable_primary_ref_frame_search = 0;
   rt_sf->check_scene_detection = 0;
   rt_sf->overshoot_detection_cbr = NO_DETECTION;
+  rt_sf->reorder_refs_on_scene_change = 0;
+  rt_sf->skip_loopfilter_static_frame = 0;
 }
 
 static AVM_INLINE void set_erp_speed_features_framesize_dependent(

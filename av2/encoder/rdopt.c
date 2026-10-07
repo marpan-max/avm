@@ -9752,6 +9752,36 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
   const int num_mode_ref_pairs =
       (bsize == BLOCK_4X4) ? 0 : ref_frame_centric_eval_order_num;
 
+  // In realtime CBR screen mode, after a scene/slide change, the QP increase
+  // causes older frames from the previous scene (with lower QP) to be assigned
+  // ref0/ref1 by av2_get_ref_frames(), pushing t-1 to ref2.
+  // Sort references by absolute temporal distance so that rank 0 in
+  // ref_frame_centric_eval_order evaluates the temporally closest reference
+  // (t-1) first, establishing an immediate low RD bound and allowing old-scene
+  // references to be pruned early.
+  MV_REFERENCE_FRAME ref_order[INTER_REFS_PER_FRAME];
+  const int max_refs = cpi->oxcf.ref_frm_cfg.max_reference_frames;
+  const bool reorder_refs_by_tdist =
+      (cpi->sf.rt_sf.reorder_refs_on_scene_change && num_total_refs > 1 &&
+       cpi->rc.frames_since_scene_change >= 1 &&
+       cpi->rc.frames_since_scene_change <= max_refs - 1);
+  if (reorder_refs_by_tdist) {
+    for (int i = 0; i < num_total_refs; ++i) ref_order[i] = i;
+    for (int i = 0; i < num_total_refs - 1; ++i) {
+      for (int j = i + 1; j < num_total_refs; ++j) {
+        const int dist_i =
+            abs(cm->ref_frames_info.ref_frame_distance[ref_order[i]]);
+        const int dist_j =
+            abs(cm->ref_frames_info.ref_frame_distance[ref_order[j]]);
+        if (dist_j < dist_i) {
+          const MV_REFERENCE_FRAME tmp = ref_order[i];
+          ref_order[i] = ref_order[j];
+          ref_order[j] = tmp;
+        }
+      }
+    }
+  }
+
   // This is the main loop of this function. It loops over all inter modes and
   // reference frames combinations and calls handle_inter_mode() to compute the
   // RD for each. Intra modes are evaluated separately after this loop.
@@ -9759,10 +9789,20 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
        ++mode_refs_pair_idx) {
     const PREDICTION_MODE this_mode =
         ref_frame_centric_eval_order[mode_refs_pair_idx].mode;
-    const MV_REFERENCE_FRAME ref_frame =
+    const MV_REFERENCE_FRAME rf0_rank =
         ref_frame_centric_eval_order[mode_refs_pair_idx].rf0;
-    const MV_REFERENCE_FRAME second_ref_frame =
+    const MV_REFERENCE_FRAME rf1_rank =
         ref_frame_centric_eval_order[mode_refs_pair_idx].rf1;
+    const MV_REFERENCE_FRAME ref_frame =
+        (reorder_refs_by_tdist && is_inter_ref_frame(rf0_rank) &&
+         (int)rf0_rank < num_total_refs)
+            ? ref_order[rf0_rank]
+            : rf0_rank;
+    const MV_REFERENCE_FRAME second_ref_frame =
+        (reorder_refs_by_tdist && is_inter_ref_frame(rf1_rank) &&
+         (int)rf1_rank < num_total_refs)
+            ? ref_order[rf1_rank]
+            : rf1_rank;
     const int comp_pred = (second_ref_frame != NONE_FRAME);
     const int is_single_pred = !comp_pred;
 
@@ -9795,11 +9835,11 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
     // because it is a different kind of prediction and can win on smooth
     // content.
     if (apply_dry_pass_shortcuts && is_inter_ref_frame(ref_frame) &&
-        ref_frame > dry_pass_cfg.ref_rank_cap && !is_tip_ref_frame(ref_frame))
+        rf0_rank > dry_pass_cfg.ref_rank_cap && !is_tip_ref_frame(ref_frame))
       continue;
     // Dry pass: same limit for the second reference of a compound mode.
     if (apply_dry_pass_shortcuts && is_inter_ref_frame(second_ref_frame) &&
-        second_ref_frame > dry_pass_cfg.ref_rank_cap)
+        rf1_rank > dry_pass_cfg.ref_rank_cap)
       continue;
     // Dry pass: mostly skip compound modes that use the same reference twice.
     // They pay for two MVs but rarely win the partition choice. When the frame
@@ -9808,7 +9848,7 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
     if (apply_dry_pass_shortcuts && comp_pred &&
         ref_frame == second_ref_frame &&
         (has_both_sides_refs ||
-         ref_frame > dry_pass_cfg.same_ref_compound_rank_cap))
+         rf0_rank > dry_pass_cfg.same_ref_compound_rank_cap))
       continue;
     if (x->skip_inter_modes_by_none_part && is_intermode_selected(this_mode))
       continue;

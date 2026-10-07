@@ -1187,6 +1187,13 @@ typedef struct REALTIME_SPEED_FEATURES {
   // Flag to indicate process for handling overshoot on slide/scene change,
   // for real-time CBR mode.
   OVERSHOOT_DETECTION_CBR overshoot_detection_cbr;
+
+  // Reorder reference frames by temporal distance in rdopt pickmode for
+  // frames immediately following a detected scene/slide change.
+  int reorder_refs_on_scene_change;
+
+  // Skip all loop filtering on static inter frames (frame_source_sad == 0).
+  int skip_loopfilter_static_frame;
 } REALTIME_SPEED_FEATURES;
 
 typedef struct LC_DEC_SPEED_FEATURES {

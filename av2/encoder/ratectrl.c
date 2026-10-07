@@ -325,6 +325,7 @@ void av2_rc_init(const AV2EncoderConfig *oxcf, RATE_CONTROL *rc) {
   rc->next_key_frame_forced = 0;
 
   rc->high_source_sad = 0;
+  rc->frames_since_scene_change = INT_MAX;
   rc->avg_source_sad = 0;
   rc->prev_avg_source_sad = 0;
   rc->frame_source_sad = 0;
@@ -2273,8 +2274,12 @@ void av2_rc_scene_detection_onepass_rt(AV2_COMP *cpi,
       rc->frames_since_key > 10 &&
       num_zero_temp_sad < thresh_zero_sad_samples) {
     rc->high_source_sad = 1;
+    rc->frames_since_scene_change = 0;
   } else {
     rc->high_source_sad = 0;
+    if (rc->frames_since_scene_change < INT_MAX) {
+      rc->frames_since_scene_change++;
+    }
   }
   rc->prev_avg_source_sad = rc->avg_source_sad;
   rc->avg_source_sad = (3 * rc->avg_source_sad + avg_sad) >> 2;
@@ -2298,12 +2303,13 @@ void av2_get_one_pass_rt_params(AV2_COMP *cpi, FRAME_TYPE *const frame_type,
         cm->current_frame.frame_number != 0 && rc->frames_to_key == 0;
     rc->frames_to_key = cpi->oxcf.kf_cfg.key_freq_max;
     rc->kf_boost = DEFAULT_KF_BOOST_RT;
+    rc->frames_since_scene_change = INT_MAX;
+    rc->frame_source_sad = 0;
     gf_group->update_type[gf_group->index] = KF_UPDATE;
   } else {
     *frame_type = INTER_FRAME;
     gf_group->update_type[gf_group->index] = LF_UPDATE;
-    if (cpi->oxcf.rc_cfg.mode == AVM_CBR &&
-        cpi->sf.rt_sf.check_scene_detection) {
+    if (cpi->sf.rt_sf.check_scene_detection) {
       av2_rc_scene_detection_onepass_rt(cpi, frame_input);
     }
   }
