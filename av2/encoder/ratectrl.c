@@ -328,6 +328,7 @@ void av2_rc_init(const AV2EncoderConfig *oxcf, RATE_CONTROL *rc) {
   rc->avg_source_sad = 0;
   rc->prev_avg_source_sad = 0;
   rc->frame_source_sad = 0;
+  rc->num_flat_blocks = 0;
   rc->rc_1_frame = 0;
   rc->rc_2_frame = 0;
   rc->q_1_frame = 0;
@@ -2215,6 +2216,7 @@ void av2_rc_scene_detection_onepass_rt(AV2_COMP *cpi,
   const AV2_COMMON *const cm = &cpi->common;
   RATE_CONTROL *const rc = &cpi->rc;
   rc->high_source_sad = 0;
+  rc->num_flat_blocks = 0;
   const YV12_BUFFER_CONFIG *const unscaled_src = frame_input->source;
   const YV12_BUFFER_CONFIG *const unscaled_last_src = frame_input->last_source;
   if (unscaled_src == NULL || unscaled_last_src == NULL) return;
@@ -2244,6 +2246,7 @@ void av2_rc_scene_detection_onepass_rt(AV2_COMP *cpi,
   uint64_t avg_sad = 0;
   uint64_t tmp_sad = 0;
   int num_samples = 0;
+  DECLARE_ALIGNED(32, static const uint16_t, zero_pred[16]) = { 0 };
 
   const int sb_cols = cm->width >> 6;
   const int sb_rows = cm->height >> 6;
@@ -2256,6 +2259,16 @@ void av2_rc_scene_detection_onepass_rt(AV2_COMP *cpi,
       avg_sad += tmp_sad;
       num_samples++;
       if (tmp_sad == 0) num_zero_temp_sad++;
+      if (is_screen) {
+        for (int r = 0; r < 64; r += 16) {
+          for (int c = 0; c < 64; c += 16) {
+            unsigned int sse;
+            const unsigned int var = cpi->fn_ptr[BLOCK_16X16].vf(
+                src_y + r * src_ystride + c, src_ystride, zero_pred, 0, &sse);
+            if (var == 0) rc->num_flat_blocks++;
+          }
+        }
+      }
 
       src_y += 64;
       last_src_y += 64;
@@ -2264,7 +2277,10 @@ void av2_rc_scene_detection_onepass_rt(AV2_COMP *cpi,
     last_src_y += (last_src_stride << 6) - (sb_cols << 6);
   }
 
-  if (num_samples > 0) avg_sad = avg_sad / num_samples;
+  if (num_samples > 0) {
+    avg_sad = avg_sad / num_samples;
+    rc->num_flat_blocks = (100 * rc->num_flat_blocks) / (num_samples << 4);
+  }
   // Flag high_source_sad if frame-average SAD exceeds both min_thresh and a
   // multiple of the running average SAD, and the frame is not mostly static.
   const int thresh_zero_sad_samples =
@@ -2291,6 +2307,7 @@ void av2_get_one_pass_rt_params(AV2_COMP *cpi, FRAME_TYPE *const frame_type,
   GF_GROUP *const gf_group = &cpi->gf_group;
   int target;
   rc->high_source_sad = 0;
+  rc->num_flat_blocks = 0;
   // Set frame type.
   if (set_key_frame(cpi, frame_flags)) {
     *frame_type = KEY_FRAME;
@@ -2341,9 +2358,7 @@ int av2_encodedframe_overshoot_cbr(AV2_COMP *cpi, int *q) {
   // by 3/4.
   const int bd_shift = cm->seq_params.bit_depth - 8;
   const uint64_t sad_thr = (uint64_t)(64 * 64 * 32) << bd_shift;
-  if (cm->width * cm->height >= 1280 * 720 &&
-      (rc->buffer_level > (rc->optimal_buffer_level >> 1)) &&
-      rc->avg_source_sad < sad_thr) {
+  if (cm->width * cm->height >= 1280 * 720 && rc->avg_source_sad < sad_thr) {
     *q = (*q + max_qp) >> 1;
   } else {
     *q = (3 * max_qp + *q) >> 2;
