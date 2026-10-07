@@ -3393,7 +3393,8 @@ static INLINE int av2_use_hash_me(const AV2_COMP *const cpi) {
   if (!cpi->common.features.is_scc_content_by_detector) return 0;
   return (cpi->common.features.allow_intrabc) &&
          (frame_is_intra_only(&cpi->common) ||
-          cpi->common.features.allow_local_intrabc);
+          (cpi->common.features.allow_local_intrabc &&
+           cpi->sf.inter_sf.skip_eval_intrabc_in_inter_frame == 0));
 }
 
 static INLINE const YV12_BUFFER_CONFIG *get_ref_frame_yv12_buf_res_indep(

@@ -2322,6 +2322,20 @@ static AVM_INLINE void encode_frame_internal(AV2_COMP *cpi) {
   cpi->intrabc_used = 0;
 
   features->allow_intrabc &= (oxcf->kf_cfg.enable_intrabc);
+  if (frame_is_intra_only(cm)) {
+    // In real-time mode when global IntraBC is enabled on keyframes, skip the
+    // second (local) IntraBC search pass on keyframes.
+    if (cpi->sf.inter_sf.skip_eval_intrabc_in_inter_frame >= 1 &&
+        features->allow_global_intrabc) {
+      features->allow_local_intrabc = 0;
+    }
+  } else if (cpi->sf.inter_sf.skip_eval_intrabc_in_inter_frame == 1) {
+    // When IntraBC is skipped on this inter frame (level 1), disable
+    // allow_intrabc and allow_local_intrabc to avoid building the block hash
+    // table and updating DV cost tables.
+    features->allow_intrabc = 0;
+    features->allow_local_intrabc = 0;
+  }
 
   // Decide which motion modes to scan this frame
   // TODO(rachelbarker): Rework pruning into something more unified in phase 2
