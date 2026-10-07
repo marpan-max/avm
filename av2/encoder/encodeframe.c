@@ -2244,6 +2244,20 @@ static AVM_INLINE void encode_frame_internal(AV2_COMP *cpi) {
   cpi->intrabc_used = 0;
 
   features->allow_intrabc &= (oxcf->kf_cfg.enable_intrabc);
+  if (frame_is_intra_only(cm)) {
+    // In real-time mode when global IntraBC is enabled on keyframes, skip the
+    // second (local) IntraBC search pass on keyframes.
+    if (cpi->sf.inter_sf.skip_eval_intrabc_in_inter_frame >= 1 &&
+        features->allow_global_intrabc) {
+      features->allow_local_intrabc = 0;
+    }
+  } else if (cpi->sf.inter_sf.skip_eval_intrabc_in_inter_frame == 1) {
+    // When IntraBC is skipped on this inter frame (level 1), disable
+    // allow_intrabc and allow_local_intrabc to avoid building the block hash
+    // table and updating DV cost tables.
+    features->allow_intrabc = 0;
+    features->allow_local_intrabc = 0;
+  }
 
   // Decide which motion modes to scan this frame
   // TODO(rachelbarker): Rework pruning into something more unified in phase 2
@@ -2305,9 +2319,16 @@ static AVM_INLINE void encode_frame_internal(AV2_COMP *cpi) {
     hash_table_created = 1;
     av2_generate_block_2x2_hash_value(intrabc_hash_info, cpi->source,
                                       block_hash_values[0], is_block_same[0]);
-    // Hash data generated for screen contents is used for intraBC ME
-    const int min_alloc_size = block_size_wide[mi_params->mi_alloc_bsize];
-    const int max_sb_size = (1 << (cm->mib_size_log2 + MI_SIZE_LOG2));
+    // Hash data generated for screen contents is used for intraBC ME.
+    // On pruned inter frames (level 2), IntraBC is only evaluated on 8x8 and
+    // 16x16 blocks, so restrict hash table insertion to [8, 16].
+    const int is_pruned_inter =
+        !frame_is_intra_only(cm) &&
+        cpi->sf.inter_sf.skip_eval_intrabc_in_inter_frame == 2;
+    const int min_alloc_size =
+        is_pruned_inter ? 8 : block_size_wide[mi_params->mi_alloc_bsize];
+    const int max_sb_size =
+        is_pruned_inter ? 16 : (1 << (cm->mib_size_log2 + MI_SIZE_LOG2));
     int src_idx = 0;
     for (int size = 4; size <= max_sb_size; size *= 2, src_idx = !src_idx) {
       const int dst_idx = !src_idx;

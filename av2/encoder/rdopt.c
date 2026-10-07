@@ -6723,9 +6723,13 @@ static int64_t rd_pick_intrabc_mode_sb(const AV2_COMP *cpi, MACROBLOCK *x,
           bestsme - av2_get_mv_err_cost(&best_subpel_mv.as_mv,
                                         &fullms_params.mv_cost_params);
 
+      const int is_pruned_inter_intrabc =
+          !frame_is_intra_only(cm) &&
+          cpi->sf.inter_sf.skip_eval_intrabc_in_inter_frame == 2;
       const int use_subpel_search =
           bestsme < INT_MAX &&
           !cpi->common.features.cur_frame_force_integer_mv &&
+          !is_pruned_inter_intrabc &&
           mbmi->pb_mv_precision > MV_PRECISION_ONE_PEL &&
           is_bv_valid(&best_full_pel_mv, cm, xd, mi_row, mi_col, bsize,
                       fullms_params);
@@ -6818,6 +6822,11 @@ static int64_t rd_pick_intrabc_mode_sb(const AV2_COMP *cpi, MACROBLOCK *x,
       }
 
       if (best_ref_bv_cost == INT_MAX) continue;
+      // For pruned IntraBC on inter frames (skip_eval_intrabc_in_inter_frame ==
+      // 2), skip zero-MVD reference-BV-only mode (intrabc_mode == 1) and only
+      // evaluate candidates found by the hash/local block vector search
+      // (intrabc_mode == 0).
+      if (is_pruned_inter_intrabc && best_intrabc_mode == 1) continue;
 
       mbmi->intrabc_mode = best_intrabc_mode;
       mbmi->intrabc_drl_idx = best_intrabc_drl_idx;
@@ -6881,11 +6890,18 @@ static int64_t rd_pick_intrabc_mode_sb(const AV2_COMP *cpi, MACROBLOCK *x,
 
         assert(IMPLIES(!is_pb_mv_precision_active,
                        mbmi->pb_mv_precision == default_mv_precision));
+        // For pruned IntraBC on inter frames, restrict evaluation to
+        // integer-pel precision.
+        if (is_pruned_inter_intrabc &&
+            mbmi->pb_mv_precision != MV_PRECISION_ONE_PEL) {
+          continue;
+        }
 
         // Do motion search refinement if the target precision is not default
         // precision
         if (is_pb_mv_precision_active &&
-            (mbmi->pb_mv_precision != default_mv_precision)) {
+            (mbmi->pb_mv_precision != default_mv_precision) &&
+            !is_pruned_inter_intrabc) {
           int not_used = 0;
 
           SUBPEL_MOTION_SEARCH_PARAMS sub_pel_ms_params;
@@ -9405,10 +9421,32 @@ static void try_intrabc_after_inter_search(
   MACROBLOCKD *const xd = &x->e_mbd;
   MB_MODE_INFO *const mbmi = xd->mi[0];
 
-  const int try_intrabc =
-      cpi->oxcf.kf_cfg.enable_intrabc && cpi->oxcf.kf_cfg.enable_intrabc_ext &&
-      !cpi->sf.inter_sf.skip_eval_intrabc_in_inter_frame &&
-      av2_allow_intrabc(cm, xd, bsize) && (xd->tree_type != CHROMA_PART);
+  // When skip_eval_intrabc_in_inter_frame == 2, only evaluate IntraBC on
+  // non-skippable small blocks (<= 16x16) with high source variance, at least
+  // medium SB source SAD, high best_rd cost, and where the best mode so far is
+  // intra or has a large inter MV (> 32 full pixels).
+  const unsigned int var_thresh = 100;
+  const int mv_thresh = 256;
+  const int is_large_mv_inter =
+      is_inter_mode(search_state->best_mbmode.mode) &&
+      (abs(search_state->best_mbmode.mv[0].as_mv.row) > mv_thresh ||
+       abs(search_state->best_mbmode.mv[0].as_mv.col) > mv_thresh);
+  const int num_pixels = block_size_wide[bsize] * block_size_high[bsize];
+  const int shift = (xd->bd - 8) * 2;
+  const int64_t rd_thresh = ((int64_t)num_pixels * (128 << RDDIV_BITS))
+                            << shift;
+  const int skip_intrabc =
+      (cpi->sf.inter_sf.skip_eval_intrabc_in_inter_frame == 1) ||
+      (cpi->sf.inter_sf.skip_eval_intrabc_in_inter_frame == 2 &&
+       !(search_state->best_mode_skippable == 0 &&
+         (!is_inter_mode(search_state->best_mbmode.mode) ||
+          is_large_mv_inter) &&
+         search_state->best_rd > rd_thresh && x->source_sad_level >= kMedSad &&
+         bsize <= BLOCK_16X16 && x->source_variance > var_thresh));
+  const int try_intrabc = cpi->oxcf.kf_cfg.enable_intrabc &&
+                          cpi->oxcf.kf_cfg.enable_intrabc_ext &&
+                          !skip_intrabc && av2_allow_intrabc(cm, xd, bsize) &&
+                          (xd->tree_type != CHROMA_PART);
   if (!(try_intrabc && is_intra_mode_allowed)) return;
 
   RD_STATS this_rd_cost;
@@ -9461,6 +9499,7 @@ static void try_intrabc_after_inter_search(
   av2_copy_array(ctx->tx_type_map, xd->tx_type_map, ctx->num_4x4_blk);
   av2_copy_array(ctx->cctx_type_map, xd->cctx_type_map,
                  ctx->num_4x4_blk_chroma);
+  txfm_info->skip_txfm = mbmi->skip_txfm[xd->tree_type == CHROMA_PART];
   ctx->rd_stats.skip_txfm = mbmi->skip_txfm[xd->tree_type == CHROMA_PART];
 }
 
