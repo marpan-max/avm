@@ -727,6 +727,10 @@ int av2_get_ref_bv_rate_cost(int intrabc_mode, int intrabc_drl_idx,
 int av2_pick_ref_bv(FULLPEL_MV *best_full_mv, int max_bvp_drl_bits,
                     const FULLPEL_MOTION_SEARCH_PARAMS *fullms_params);
 
+int16_t av2_vector_match(const int16_t *ref, const int16_t *src, int bwl,
+                         int search_size_top, int search_size_bottom,
+                         int full_search, int *sad);
+
 unsigned int av2_int_pro_motion_estimation(
     const struct AV2_COMP *cpi, MACROBLOCK *x, BLOCK_SIZE bsize, int mi_row,
     int mi_col, const MV *ref_mv, unsigned int *y_sad_zero,

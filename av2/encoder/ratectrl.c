@@ -29,9 +29,12 @@
 #include "av2/common/quant_common.h"
 #include "av2/common/seg_common.h"
 
+#include "config/avm_dsp_rtcd.h"
+
 #include "av2/encoder/encodemv.h"
 #include "av2/encoder/encode_strategy.h"
 #include "av2/encoder/gop_structure.h"
+#include "av2/encoder/mcomp.h"
 #include "av2/encoder/random.h"
 #include "av2/encoder/ratectrl.h"
 #include "av2/encoder/scale.h"
@@ -328,6 +331,7 @@ void av2_rc_init(const AV2EncoderConfig *oxcf, RATE_CONTROL *rc) {
   rc->avg_source_sad = 0;
   rc->prev_avg_source_sad = 0;
   rc->frame_source_sad = 0;
+  rc->frame_scroll = 0;
   rc->rc_1_frame = 0;
   rc->rc_2_frame = 0;
   rc->q_1_frame = 0;
@@ -2213,6 +2217,89 @@ static inline int set_key_frame(AV2_COMP *cpi, unsigned int frame_flags) {
   return 0;
 }
 
+// Estimate horizontal or vertical scroll motion at a given superblock position
+// using 1-D integral projection matching.
+static unsigned int estimate_scroll_motion(
+    const AV2_COMP *cpi, BLOCK_SIZE bsize, int mi_row, int mi_col,
+    int me_search_size_col, int me_search_size_row, const uint16_t *src_y,
+    int src_ystride, const uint16_t *last_src_y, int last_src_stride,
+    int16_t *best_intmv_col, int16_t *best_intmv_row) {
+  const AV2_COMMON *const cm = &cpi->common;
+  int best_sad_col, best_sad_row;
+  const int bw = block_size_wide[bsize];
+  const int bh = block_size_high[bsize];
+  int search_size_width = me_search_size_col;
+  int search_size_height = me_search_size_row;
+
+  // Keep search_size_width/height a multiple of 16.
+  search_size_width &= ~15;
+  search_size_height &= ~15;
+
+  const int width_ref_buf = (search_size_width << 1) + bw;
+  const int height_ref_buf = (search_size_height << 1) + bh;
+  assert(width_ref_buf <= 2176 && height_ref_buf <= 2176);
+
+  DECLARE_ALIGNED(32, int16_t, hbuf[2176]);
+  DECLARE_ALIGNED(32, int16_t, vbuf[2176]);
+  DECLARE_ALIGNED(32, int16_t, src_hbuf[128]);
+  DECLARE_ALIGNED(32, int16_t, src_vbuf[128]);
+  DECLARE_ALIGNED(32, int16_t, zero_buf[128]) = { 0 };
+
+  const int bd_shift = cm->seq_params.bit_depth - 8;
+  // Dynamic range of projection after shift is [0, 511] (9 bits).
+  const int row_norm_factor = mi_size_high_log2[bsize] + 1 + bd_shift;
+  const int col_norm_factor = 3 + (bw >> 5) + bd_shift;
+  const uint16_t *src_pos =
+      src_y + (mi_row << MI_SIZE_LOG2) * src_ystride + (mi_col << MI_SIZE_LOG2);
+  const uint16_t *last_src_pos = last_src_y +
+                                 (mi_row << MI_SIZE_LOG2) * last_src_stride +
+                                 (mi_col << MI_SIZE_LOG2);
+
+  // Set up prediction 1-D reference set for rows.
+  const uint16_t *ref_buf = last_src_pos - search_size_width;
+  avm_int_pro_row(hbuf, ref_buf, last_src_stride, width_ref_buf, bh,
+                  row_norm_factor);
+
+  // Set up prediction 1-D reference set for cols.
+  ref_buf = last_src_pos - search_size_height * last_src_stride;
+  avm_int_pro_col(vbuf, ref_buf, last_src_stride, bw, height_ref_buf,
+                  col_norm_factor);
+
+  // Set up src 1-D reference set.
+  avm_int_pro_row(src_hbuf, src_pos, src_ystride, bw, bh, row_norm_factor);
+  avm_int_pro_col(src_vbuf, src_pos, src_ystride, bw, bh, col_norm_factor);
+
+  // Find the best match per 1-D search.
+  const int full_search = 1;
+  *best_intmv_row = av2_vector_match(vbuf, src_vbuf, mi_size_high_log2[bsize],
+                                     search_size_height, search_size_height,
+                                     full_search, &best_sad_row);
+  *best_intmv_col = av2_vector_match(hbuf, src_hbuf, mi_size_wide_log2[bsize],
+                                     search_size_width, search_size_width,
+                                     full_search, &best_sad_col);
+
+  // Exclude flat blocks or blocks that are already stationary at zero MV, as
+  // 1-D vector variance removes DC offset and can match flat slide changes.
+  int zero_sad, src_var;
+  if (best_sad_col < best_sad_row) {
+    *best_intmv_row = 0;
+    zero_sad = avm_vector_var(&hbuf[search_size_width], src_hbuf,
+                              mi_size_wide_log2[bsize]);
+    src_var = avm_vector_var(src_hbuf, zero_buf, mi_size_wide_log2[bsize]);
+  } else {
+    *best_intmv_col = 0;
+    zero_sad = avm_vector_var(&vbuf[search_size_height], src_vbuf,
+                              mi_size_high_log2[bsize]);
+    src_var = avm_vector_var(src_vbuf, zero_buf, mi_size_high_log2[bsize]);
+  }
+  const int min_var_thresh = 1500;
+  if (src_var < min_var_thresh || zero_sad < min_var_thresh) {
+    return UINT_MAX;
+  }
+
+  return AVMMIN(best_sad_col, best_sad_row);
+}
+
 // Compute 64x64 SB source SAD between current and previous unscaled frames
 // to detect scene/slide changes (high_source_sad) and track moving-average
 // source SAD (avg_source_sad, prev_avg_source_sad, frame_source_sad) for 1-pass
@@ -2282,6 +2369,48 @@ void av2_rc_scene_detection_onepass_rt(AV2_COMP *cpi,
     rc->high_source_sad = 1;
   } else {
     rc->high_source_sad = 0;
+  }
+  // Check if scene change corresponds to coherent scroll motion.
+  // Pick a few center points and look for vertical or horizontal motion via
+  // int_pro motion estimation. Keep search size within bounds given the offset
+  // from center position.
+  rc->frame_scroll = 0;
+  if (rc->high_source_sad == 1) {
+    const int offset = 32;  // 32 * 4 = 128 pixels
+    const int me_search_size_col =
+        AVMMIN(512, (src_width >> 1) - (offset << 3));
+    const int me_search_size_row =
+        AVMMIN(512, (src_height >> 1) - (offset << 3));
+    if (me_search_size_col >= 64 && me_search_size_row >= 64) {
+      const unsigned int sad_thresh = 300;
+      const int num_points = src_width * src_height >= 1280 * 720 ? 3 : 1;
+      src_y = unscaled_src->y_buffer;
+      last_src_y = unscaled_last_src->y_buffer;
+      for (int pts = 0; pts < num_points; pts++) {
+        int offset_row = 0;
+        int offset_col = 0;
+        if (pts == 1) {
+          offset_row = -offset;
+          offset_col = -offset;
+        } else if (pts == 2) {
+          offset_row = offset;
+          offset_col = offset;
+        }
+        const int mi_row = (src_height >> 3) + offset_row;
+        const int mi_col = (src_width >> 3) + offset_col;
+        int16_t best_intmv_col = 0;
+        int16_t best_intmv_row = 0;
+        const unsigned int y_sad = estimate_scroll_motion(
+            cpi, BLOCK_128X128, mi_row, mi_col, me_search_size_col,
+            me_search_size_row, src_y, src_ystride, last_src_y, last_src_stride,
+            &best_intmv_col, &best_intmv_row);
+        if (y_sad <= sad_thresh &&
+            (abs(best_intmv_col) > 4 || abs(best_intmv_row) > 4)) {
+          rc->frame_scroll = 1;
+          break;
+        }
+      }
+    }
   }
   rc->prev_avg_source_sad = rc->avg_source_sad;
   rc->avg_source_sad = (3 * rc->avg_source_sad + avg_sad) >> 2;
