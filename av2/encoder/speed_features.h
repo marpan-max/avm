@@ -1239,6 +1239,17 @@ typedef struct REALTIME_SPEED_FEATURES {
   // 0: Disabled (always use zero MV)
   // 1: Use integral projection motion estimation and neighbor MV evaluation
   int estimate_motion_for_var_based_partition;
+
+  // Seed single-reference motion search with the superblock MV found by
+  // integral projection motion estimation in variance-based partitioning
+  // (when it produces a high MV with low SAD).
+  int seed_mv_from_var_based_partition;
+
+  // Switch single-reference evaluation order in inter mode search so that the
+  // closest reference (sb_me_ref) is evaluated before ref 0 when integral
+  // projection motion estimation in variance-based partitioning finds a high
+  // MV with low SAD and ref 0 is not the closest reference.
+  int switch_ref_order_from_var_based_partition;
 } REALTIME_SPEED_FEATURES;
 
 typedef struct LC_DEC_SPEED_FEATURES {

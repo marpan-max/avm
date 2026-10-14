@@ -111,6 +111,11 @@ typedef struct {
   //! TPL's stride for the arrays in this struct.
   int tpl_stride;
   /**@}*/
+
+  //! Motion vector found by SB motion estimation in var_based_part.
+  int_mv sb_me_mv;
+  //! Reference frame used by SB motion estimation in var_based_part.
+  MV_REFERENCE_FRAME sb_me_ref;
 } SuperBlockEnc;
 
 /*! \brief Stores the best performing modes.

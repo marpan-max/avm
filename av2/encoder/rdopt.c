@@ -8202,11 +8202,17 @@ static int inter_mode_search_order_independent_skip(
                           x->inter_mode_cache[0]->ref_frame[1] != INTRA_FRAME);
     }
 
-    if (cpi->sf.inter_sf.prune_ref_frames >= 3 && ref_type > 0) {
+    const int primary_ref =
+        (cpi->sf.rt_sf.switch_ref_order_from_var_based_partition &&
+         x->sb_enc.sb_me_ref > 0)
+            ? x->sb_enc.sb_me_ref
+            : 0;
+    if (cpi->sf.inter_sf.prune_ref_frames >= 3 && ref_type != primary_ref) {
       if (search_state->best_rd != INT64_MAX) {
-        // Prune secondary references if ref 0 already produced a skippable mode
-        // (zero residual). If ref 0 match was not skippable, do not prune:
-        // allow evaluating secondary references for this block.
+        // Prune secondary references if primary ref already produced a
+        // skippable mode (zero residual). If primary ref match was not
+        // skippable, do not prune: allow evaluating secondary references for
+        // this block.
         if (!search_state->best_mode_skippable) {
           skip_ref = 0;
         }
@@ -9624,8 +9630,13 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
         picked_ref_frames_mask =
             fetch_picked_ref_frames_mask(x, cm->sb_size, cm->mib_size);
         if (picked_ref_frames_mask) {
-          // Always ensure the primary reference (ref 0) is tested.
-          picked_ref_frames_mask |= (1ULL << 0);
+          // Always ensure the primary reference is tested.
+          const int primary_ref =
+              (cpi->sf.rt_sf.switch_ref_order_from_var_based_partition &&
+               x->sb_enc.sb_me_ref > 0)
+                  ? x->sb_enc.sb_me_ref
+                  : 0;
+          picked_ref_frames_mask |= (1ULL << primary_ref);
         }
       }
     } else {
@@ -9817,12 +9828,19 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
        ++mode_refs_pair_idx) {
     const PREDICTION_MODE this_mode =
         ref_frame_centric_eval_order[mode_refs_pair_idx].mode;
-    const MV_REFERENCE_FRAME ref_frame =
+    MV_REFERENCE_FRAME ref_frame =
         ref_frame_centric_eval_order[mode_refs_pair_idx].rf0;
     const MV_REFERENCE_FRAME second_ref_frame =
         ref_frame_centric_eval_order[mode_refs_pair_idx].rf1;
     const int comp_pred = (second_ref_frame != NONE_FRAME);
     const int is_single_pred = !comp_pred;
+    if (cpi->sf.rt_sf.switch_ref_order_from_var_based_partition &&
+        is_single_pred && x->sb_enc.sb_me_ref > 0) {
+      if (ref_frame == 0)
+        ref_frame = x->sb_enc.sb_me_ref;
+      else if (ref_frame == x->sb_enc.sb_me_ref)
+        ref_frame = 0;
+    }
 
     // Gate LUT entries by runtime ref-frame availability.
     if (is_tip_ref_frame(ref_frame)) {

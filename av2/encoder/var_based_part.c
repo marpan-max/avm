@@ -855,19 +855,15 @@ static AVM_INLINE void evaluate_neighbour_mvs(AV2_COMP *cpi, MACROBLOCK *x,
 static AVM_INLINE void do_int_pro_motion_estimation(AV2_COMP *cpi,
                                                     MACROBLOCK *x,
                                                     unsigned int *y_sad,
+                                                    unsigned int *y_sad_zero,
                                                     int mi_row, int mi_col) {
   AV2_COMMON *const cm = &cpi->common;
   const BLOCK_SIZE sb_size = cm->seq_params.sb_size;
-  int me_search_size_col = block_size_wide[sb_size] >> 1;
-  int me_search_size_row = block_size_high[sb_size] >> 1;
-  if (cm->width * cm->height >= RESOLUTION_4K) {
-    me_search_size_row <<= 1;
-    me_search_size_col <<= 1;
-  }
-  unsigned int y_sad_zero = *y_sad;
+  const int me_search_size_col = block_size_wide[sb_size];
+  const int me_search_size_row = 384;
   *y_sad = av2_int_pro_motion_estimation(
-      cpi, x, sb_size, mi_row, mi_col, &kZeroMv, &y_sad_zero,
-      me_search_size_col, me_search_size_row);
+      cpi, x, sb_size, mi_row, mi_col, &kZeroMv, y_sad_zero, me_search_size_col,
+      me_search_size_row);
 }
 
 static void setup_planes(AV2_COMP *cpi, MACROBLOCK *x, unsigned int *y_sad,
@@ -891,6 +887,7 @@ static void setup_planes(AV2_COMP *cpi, MACROBLOCK *x, unsigned int *y_sad,
     mi->sb_type[PLANE_TYPE_UV] = cm->seq_params.sb_size;
     mi->mv[0].as_int = 0;
 
+    unsigned int y_sad_zero = *y_sad;
     const int est_motion =
         cpi->sf.rt_sf.estimate_motion_for_var_based_partition;
     if (!scaled_ref_last && est_motion == 1 && xd->mb_to_right_edge >= 0 &&
@@ -900,7 +897,8 @@ static void setup_planes(AV2_COMP *cpi, MACROBLOCK *x, unsigned int *y_sad,
             cpi, &x->plane[AVM_PLANE_Y].src, bsize, xd->bd);
       }
       if (x->source_variance > 100) {
-        do_int_pro_motion_estimation(cpi, x, y_sad, mi_row, mi_col);
+        do_int_pro_motion_estimation(cpi, x, y_sad, &y_sad_zero, mi_row,
+                                     mi_col);
       }
     }
 
@@ -909,6 +907,7 @@ static void setup_planes(AV2_COMP *cpi, MACROBLOCK *x, unsigned int *y_sad,
                                       x->plane[AVM_PLANE_Y].src.stride,
                                       xd->plane[AVM_PLANE_Y].pre[0].buf,
                                       xd->plane[AVM_PLANE_Y].pre[0].stride);
+      y_sad_zero = *y_sad;
     }
 
     // Evaluate if neighbours' MVs give better predictions. Zero MV is tested
@@ -917,6 +916,12 @@ static void setup_planes(AV2_COMP *cpi, MACROBLOCK *x, unsigned int *y_sad,
     if (!scaled_ref_last && est_motion == 1 &&
         (xd->up_available || xd->left_available)) {
       evaluate_neighbour_mvs(cpi, x, y_sad);
+    }
+    if (!scaled_ref_last && est_motion == 1 &&
+        *y_sad < ((y_sad_zero * 3) >> 2) &&
+        (abs(mi->mv[0].as_mv.row) > 16 || abs(mi->mv[0].as_mv.col) > 16)) {
+      x->sb_enc.sb_me_mv = mi->mv[0];
+      x->sb_enc.sb_me_ref = last_frame;
     }
   }
   // TODO(jianj-g, marpan-max): consider other references.
@@ -1049,6 +1054,8 @@ void av2_choose_var_based_partitioning(AV2_COMP *cpi,
   src_buf = x->plane[AVM_PLANE_Y].src.buf;
   int src_stride = x->plane[AVM_PLANE_Y].src.stride;
   FULLPEL_MV full_mv = kZeroFullMv;
+  x->sb_enc.sb_me_mv.as_int = INVALID_MV;
+  x->sb_enc.sb_me_ref = NONE_FRAME;
 
   if (!is_key_frame) {
     setup_planes(cpi, x, &y_sad, mi_row, mi_col, scaled_ref_last);

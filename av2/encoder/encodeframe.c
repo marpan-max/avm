@@ -1015,10 +1015,14 @@ static AVM_INLINE void encode_rd_sb(AV2_COMP *cpi, ThreadData *td,
       }
       x->sb_enc.min_partition_size = min_partition_size;
     }
+    x->sb_enc.sb_me_mv.as_int = INVALID_MV;
+    x->sb_enc.sb_me_ref = NONE_FRAME;
     xd->tree_type = SHARED_PART;
   } else {
     // The most exhaustive recursive partition search
     SuperBlockEnc *sb_enc = &x->sb_enc;
+    sb_enc->sb_me_mv.as_int = INVALID_MV;
+    sb_enc->sb_me_ref = NONE_FRAME;
     // No stats for overlay frames. Exclude key frame.
     av2_get_tpl_stats_sb(cpi, sb_size, mi_row, mi_col, sb_enc);
 

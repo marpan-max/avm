@@ -195,6 +195,21 @@ void av2_single_motion_search(const AV2_COMP *const cpi, MACROBLOCK *x,
     }
   }
 
+  if (cpi->sf.rt_sf.seed_mv_from_var_based_partition &&
+      !is_tip_ref_frame(ref) && mbmi->motion_mode == SIMPLE_TRANSLATION) {
+    const SuperBlockEnc *sb_enc = &x->sb_enc;
+    if (ref == sb_enc->sb_me_ref && sb_enc->sb_me_mv.as_int != 0 &&
+        sb_enc->sb_me_mv.as_int != INVALID_MV) {
+      FULLPEL_MV fmv = get_fullmv_from_mv(&sb_enc->sb_me_mv.as_mv);
+      full_pel_lower_mv_precision(&fmv, mbmi->pb_mv_precision);
+      if (!CHECK_MV_EQUAL(fmv, start_mv)) {
+        cand[cnt].fmv = fmv;
+        cand[cnt].weight = 0;
+        cnt++;
+      }
+    }
+  }
+
   // Further reduce the search range.
   if (search_range < INT_MAX) {
     const search_site_config *search_site_cfg =
