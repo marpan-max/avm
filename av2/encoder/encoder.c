@@ -3660,7 +3660,7 @@ static int encode_without_recode(AV2_COMP *cpi) {
   // encoded at high/max QP, and if so, set the q and adjust some rate
   // control parameters.
   if (cpi->sf.rt_sf.overshoot_detection_cbr == FAST_DETECTION_MAXQ &&
-      cpi->rc.high_source_sad) {
+      cpi->rc.high_source_sad && !cpi->rc.frame_scroll) {
     av2_encodedframe_overshoot_cbr(cpi, &q);
   }
 

@@ -2235,10 +2235,9 @@ static int full_pixel_exhaustive(const FULLPEL_MV start_mv,
   return bestsme;
 }
 
-static AVM_INLINE int16_t vector_match(const int16_t *ref, const int16_t *src,
-                                       int bwl, int search_size_top,
-                                       int search_size_bottom, int full_search,
-                                       int *sad) {
+int16_t av2_vector_match(const int16_t *ref, const int16_t *src, int bwl,
+                         int search_size_top, int search_size_bottom,
+                         int full_search, int *sad) {
   int best_sad = INT_MAX;
   int this_sad;
   int d;
@@ -2393,12 +2392,12 @@ unsigned int av2_int_pro_motion_estimation(const AV2_COMP *cpi, MACROBLOCK *x,
 
   // Find the best match per 1-D search.
   FULLPEL_MV best_full_mv = {
-    vector_match(vbuf, src_vbuf, mi_size_high_log2[bsize],
-                 search_size_height_top, search_size_height_bottom, full_search,
-                 &best_sad_row),
-    vector_match(hbuf, src_hbuf, mi_size_wide_log2[bsize],
-                 search_size_width_left, search_size_width_right, full_search,
-                 &best_sad_col),
+    av2_vector_match(vbuf, src_vbuf, mi_size_high_log2[bsize],
+                     search_size_height_top, search_size_height_bottom,
+                     full_search, &best_sad_row),
+    av2_vector_match(hbuf, src_hbuf, mi_size_wide_log2[bsize],
+                     search_size_width_left, search_size_width_right,
+                     full_search, &best_sad_col),
   };
 
   // For screen: select between horiz or vert motion.
