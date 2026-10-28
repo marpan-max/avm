@@ -3603,8 +3603,15 @@ static INLINE int has_second_drl_by_mode(const PREDICTION_MODE mode,
 // options and speed.
 static AVM_INLINE void enforce_max_ref_frames(AV2_COMP *cpi,
                                               int *ref_frame_flags) {
+  const AV2_COMMON *const cm = &cpi->common;
   MV_REFERENCE_FRAME ref_frame;
   int total_valid_refs = 0;
+
+  if (cpi->sf.rt_sf.rtc_enable_bru && cm->bru.enabled &&
+      !cm->bru.frame_inactive_flag && cm->bru.update_ref_idx >= 0 &&
+      cm->bru.update_ref_idx < INTER_REFS_PER_FRAME) {
+    *ref_frame_flags &= ~(1 << cm->bru.update_ref_idx);
+  }
 
   for (ref_frame = 0; ref_frame < INTER_REFS_PER_FRAME; ++ref_frame) {
     if (*ref_frame_flags & (1 << ref_frame)) {

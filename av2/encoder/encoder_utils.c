@@ -1163,56 +1163,126 @@ void active_region_detection(AV2_COMP *cpi,
     return;
   }
 
-  cpi->active_map.update = 1;
-  cpi->active_map.enabled = 1;
-  memset(active_map, AM_SEGMENT_ID_INACTIVE, mi_rows * mi_cols);
-
-  // compute active map based upon pixel-wise comparison
-  for (int comp = 0; comp < num_comps; comp++) {
-    const int uv_flag = (comp > 0);
-    const int plane_width = cur_picture->widths[uv_flag];
-    const int plane_height = cur_picture->heights[uv_flag];
-    const int stride = cur_picture->strides[uv_flag];
-    uint16_t *cur_buffer = cur_picture->buffers[comp];
-    uint16_t *last_buffer = last_picture->buffers[comp];
-    const int comp_mi_width =
-        uv_flag ? (MI_SIZE >> cur_picture->subsampling_x) : MI_SIZE;
-    const int comp_mi_height =
-        uv_flag ? (MI_SIZE >> cur_picture->subsampling_y) : MI_SIZE;
-
-    for (int r_mi = 0, mi_idx = 0; r_mi < mi_rows; r_mi++) {
-      for (int c_mi = 0; c_mi < mi_cols; c_mi++, mi_idx++) {
-        bool is_active = true;
-
-        // only check if block is not active: once active always active
-        if (active_map[mi_idx] == AM_SEGMENT_ID_INACTIVE) {
-          int x_pos = c_mi * comp_mi_width;
-          int y_pos = r_mi * comp_mi_height;
-          uint16_t *cur_ptr = cur_buffer + y_pos * stride + x_pos;
-          uint16_t *last_ptr = last_buffer + y_pos * stride + x_pos;
-          int block_width = AVMMIN(comp_mi_width, plane_width - x_pos);
-          int block_height = AVMMIN(comp_mi_height, plane_height - y_pos);
-
-          is_active = false;
-          for (int r = 0; r < block_height; r++) {
-            for (int c = 0; c < block_width; c++) {
-              if (cur_ptr[c] != last_ptr[c]) {
-                is_active = true;
-                goto next_block;
-              }
-            }
-            cur_ptr += stride;
-            last_ptr += stride;
-          }
-        }
-      next_block:
-        active_map[mi_idx] =
-            is_active ? AM_SEGMENT_ID_ACTIVE : AM_SEGMENT_ID_INACTIVE;
-        continue;
+  if (cpi->sf.rt_sf.rtc_enable_bru) {
+    const int unit_rows = bru_info->unit_rows;
+    const int unit_cols = bru_info->unit_cols;
+    const int unit_size = cm->seq_params.mib_size;
+    uint8_t *const active_mode_map = bru_info->active_mode_map;
+    int bru_slot = -1;
+    for (int i = 0; i < cm->seq_params.ref_frames; ++i) {
+      const RefCntBuffer *const buf = cm->ref_frame_map[i];
+      if (buf == NULL) continue;
+      if ((int)buf->display_order_hint == cm->bru.ref_disp_order) {
+        bru_slot = i;
+        break;
       }
     }
+    const bool check_cbr_refinement =
+        (cpi->oxcf.mode == REALTIME && cpi->oxcf.rc_cfg.mode == AVM_CBR &&
+         bru_slot >= 0 && bru_info->ref_sb_qindex[bru_slot] != NULL);
+    const int q_cur = cpi->rc.last_q[INTER_FRAME];
+    const bool q_stepping_down =
+        (cpi->rc.avg_frame_qindex[INTER_FRAME] > q_cur + 12);
+    int q_boost_thresh = AVMMAX(cpi->rc.best_quality + 4, q_cur + 4);
+    if (cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ &&
+        cpi->cyclic_refresh != NULL &&
+        cpi->cyclic_refresh->apply_cyclic_refresh &&
+        cpi->cyclic_refresh->percent_refresh > 0) {
+      const int qdelta = (cpi->cyclic_refresh->qindex_delta[1] < 0)
+                             ? cpi->cyclic_refresh->qindex_delta[1]
+                             : -AVMMIN(q_cur * 30 / 100, 40);
+      q_boost_thresh = AVMMAX(cpi->rc.best_quality + 4, q_cur + (qdelta >> 1));
+    }
+    int coarse_static_sbs = 0;
+    int unboosted_static_sbs = 0;
+
+    bru_info->blocks_skipped = 0;
+    for (int r = 0, mi_row = 0, unit_idx = 0; r < unit_rows;
+         r++, mi_row += unit_size) {
+      for (int c = 0, mi_col = 0; c < unit_cols;
+           c++, unit_idx++, mi_col += unit_size) {
+        const unsigned int sb_sad = av2_get_sb_source_sad(
+            cpi, cur_picture, last_picture, mi_row, mi_col);
+        if (sb_sad > 0) {
+          active_mode_map[unit_idx] = 3;
+        } else {
+          if (check_cbr_refinement) {
+            const int q_ref = bru_info->ref_sb_qindex[bru_slot][unit_idx];
+            if (q_ref > q_cur + 8 ||
+                (q_stepping_down && q_ref > cpi->rc.best_quality + 8)) {
+              coarse_static_sbs++;
+            }
+            if (q_ref > q_boost_thresh) {
+              unboosted_static_sbs++;
+            }
+          }
+          active_mode_map[unit_idx] = 0;
+          bru_info->blocks_skipped++;
+        }
+      }
+    }
+    if (check_cbr_refinement && bru_info->blocks_skipped > 0) {
+      if (coarse_static_sbs > 0 ||
+          (unboosted_static_sbs * 4 > (int)bru_info->blocks_skipped)) {
+        bru_info->blocks_skipped = 0;
+        return;
+      }
+    }
+    av2_disable_segmentation(&cm->seg);
+    cpi->active_map.update = 0;
+    cpi->active_map.enabled = 0;
+  } else {
+    cpi->active_map.update = 1;
+    cpi->active_map.enabled = 1;
+    memset(active_map, AM_SEGMENT_ID_INACTIVE, mi_rows * mi_cols);
+
+    // compute active map based upon pixel-wise comparison
+    for (int comp = 0; comp < num_comps; comp++) {
+      const int uv_flag = (comp > 0);
+      const int plane_width = cur_picture->widths[uv_flag];
+      const int plane_height = cur_picture->heights[uv_flag];
+      const int stride = cur_picture->strides[uv_flag];
+      uint16_t *cur_buffer = cur_picture->buffers[comp];
+      uint16_t *last_buffer = last_picture->buffers[comp];
+      const int comp_mi_width =
+          uv_flag ? (MI_SIZE >> cur_picture->subsampling_x) : MI_SIZE;
+      const int comp_mi_height =
+          uv_flag ? (MI_SIZE >> cur_picture->subsampling_y) : MI_SIZE;
+
+      for (int r_mi = 0, mi_idx = 0; r_mi < mi_rows; r_mi++) {
+        for (int c_mi = 0; c_mi < mi_cols; c_mi++, mi_idx++) {
+          bool is_active = true;
+
+          // only check if block is not active: once active always active
+          if (active_map[mi_idx] == AM_SEGMENT_ID_INACTIVE) {
+            int x_pos = c_mi * comp_mi_width;
+            int y_pos = r_mi * comp_mi_height;
+            uint16_t *cur_ptr = cur_buffer + y_pos * stride + x_pos;
+            uint16_t *last_ptr = last_buffer + y_pos * stride + x_pos;
+            int block_width = AVMMIN(comp_mi_width, plane_width - x_pos);
+            int block_height = AVMMIN(comp_mi_height, plane_height - y_pos);
+
+            is_active = false;
+            for (int r = 0; r < block_height; r++) {
+              for (int c = 0; c < block_width; c++) {
+                if (cur_ptr[c] != last_ptr[c]) {
+                  is_active = true;
+                  goto next_block;
+                }
+              }
+              cur_ptr += stride;
+              last_ptr += stride;
+            }
+          }
+        next_block:
+          active_map[mi_idx] =
+              is_active ? AM_SEGMENT_ID_ACTIVE : AM_SEGMENT_ID_INACTIVE;
+          continue;
+        }
+      }
+    }
+    set_ard_active_map(cpi);
   }
-  set_ard_active_map(cpi);
   // in set_ard_active_map, active region is set to '11' and inactive region is
   // set to '00' in cluster_active_regions, the rect regions are xor with '1'
   // such that active region become '10', extended active region is '01' the

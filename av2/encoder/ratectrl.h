@@ -250,6 +250,7 @@ typedef struct {
   int rc_2_frame;
   int q_1_frame;
   int q_2_frame;
+  int bru_rtc_picked_q;
 
   float_t arf_boost_factor;
 

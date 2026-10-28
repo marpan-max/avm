@@ -1384,6 +1384,9 @@ typedef struct REALTIME_SPEED_FEATURES {
   // 0: Disabled (always use zero MV)
   // 1: Use integral projection motion estimation and neighbor MV evaluation
   int estimate_motion_for_var_based_partition;
+
+  // Enable Block Reference Update (BRU) in real-time mode.
+  int rtc_enable_bru;
 } REALTIME_SPEED_FEATURES;
 
 typedef struct LC_DEC_SPEED_FEATURES {

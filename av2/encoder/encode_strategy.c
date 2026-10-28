@@ -1370,8 +1370,10 @@ int av2_encode_strategy(AV2_COMP *const cpi, size_t *const size,
   if (!is_stat_generation_stage(cpi)) {
     cm->current_frame.frame_type = frame_params.frame_type;
     // get last frame idx as bru frame
-    cm->bru.enabled = cpi->oxcf.tool_cfg.enable_bru > 0 &&
-                      (frame_params.frame_type == INTER_FRAME);
+    cm->bru.enabled =
+        cpi->oxcf.tool_cfg.enable_bru > 0 &&
+        (frame_params.frame_type == INTER_FRAME) &&
+        (!cpi->sf.rt_sf.rtc_enable_bru || cpi->rc.frames_since_key >= 4);
     cm->bru.frame_inactive_flag = 0;
     if (cm->bru.enabled) {
       int n_future = 0;
@@ -1392,7 +1394,8 @@ int av2_encode_strategy(AV2_COMP *const cpi, size_t *const size,
       }
     }
     if (cm->bru.enabled && frame_input.bru_ref_source != NULL &&
-        !frame_is_intra_only(&cpi->common)) {
+        !frame_is_intra_only(&cpi->common) &&
+        !(cpi->sf.rt_sf.rtc_enable_bru && cpi->rc.high_source_sad)) {
       active_region_detection(cpi, frame_input.source,
                               frame_input.bru_ref_source);
       //  disable bru if
@@ -1413,6 +1416,7 @@ int av2_encode_strategy(AV2_COMP *const cpi, size_t *const size,
           (cm->bru.blocks_skipped == cm->bru.total_units);
     } else {
       cm->bru.enabled = 0;
+      if (cpi->sf.rt_sf.rtc_enable_bru) cm->bru.blocks_skipped = 0;
       cm->bru.update_ref_idx = -1;
     }
     // clean up active sb queue if any left over

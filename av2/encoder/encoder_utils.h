@@ -1008,6 +1008,11 @@ int av2_is_integer_mv(const YV12_BUFFER_CONFIG *cur_picture,
 
 void av2_set_mb_ssim_rdmult_scaling(AV2_COMP *cpi);
 
+unsigned int av2_get_sb_source_sad(const AV2_COMP *cpi,
+                                   const YV12_BUFFER_CONFIG *cur_src,
+                                   const YV12_BUFFER_CONFIG *last_src,
+                                   int mi_row, int mi_col);
+
 void active_region_detection(AV2_COMP *cpi,
                              const YV12_BUFFER_CONFIG *cur_picture,
                              const YV12_BUFFER_CONFIG *last_picture);

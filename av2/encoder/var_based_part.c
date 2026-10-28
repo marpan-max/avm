@@ -906,7 +906,12 @@ static void setup_planes(AV2_COMP *cpi, MACROBLOCK *x, unsigned int *y_sad,
   const int num_planes = av2_num_planes(cm);
   BLOCK_SIZE bsize = cm->sb_size;
   MB_MODE_INFO *mi = xd->mi[0];
-  const MV_REFERENCE_FRAME last_frame = get_closest_pastcur_ref_or_ref0(cm);
+  MV_REFERENCE_FRAME last_frame = get_closest_pastcur_ref_or_ref0(cm);
+  if (cpi->sf.rt_sf.rtc_enable_bru && cm->bru.enabled &&
+      last_frame == cm->bru.update_ref_idx) {
+    last_frame =
+        (last_frame == 0 && cm->ref_frames_info.num_total_refs > 1) ? 1 : 0;
+  }
   const YV12_BUFFER_CONFIG *yv12 = get_ref_frame_yv12_buf(cm, last_frame);
   assert(yv12 != NULL);
   if (yv12 != NULL) {

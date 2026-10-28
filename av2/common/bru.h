@@ -103,6 +103,17 @@ static INLINE void realloc_bru_info(AV2_COMMON *cm) {
     CHECK_MEM_ERROR(
         cm, bru_info->ref_scores,
         (RefScoreData *)avm_calloc(REF_FRAMES, sizeof(RefScoreData)));
+
+    avm_free(bru_info->cur_sb_qindex);
+    CHECK_MEM_ERROR(cm, bru_info->cur_sb_qindex,
+                    (uint8_t *)avm_malloc(bru_info->total_units));
+    memset(bru_info->cur_sb_qindex, 255, bru_info->total_units);
+    for (int i = 0; i < REF_FRAMES; ++i) {
+      avm_free(bru_info->ref_sb_qindex[i]);
+      CHECK_MEM_ERROR(cm, bru_info->ref_sb_qindex[i],
+                      (uint8_t *)avm_malloc(bru_info->total_units));
+      memset(bru_info->ref_sb_qindex[i], 255, bru_info->total_units);
+    }
   }
   return;
 }
@@ -112,6 +123,10 @@ static INLINE void free_bru_info(AV2_COMMON const *cm) {
   avm_free(cm->bru.active_region);
   avm_free(cm->bru.active_sb_in_region);
   avm_free(cm->bru.ref_scores);
+  avm_free(cm->bru.cur_sb_qindex);
+  for (int i = 0; i < REF_FRAMES; ++i) {
+    avm_free(cm->bru.ref_sb_qindex[i]);
+  }
   return;
 }
 /* Check if current mi is the start mi of the super block*/

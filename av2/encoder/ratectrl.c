@@ -625,14 +625,17 @@ void av2_rc_update_rate_correction_factors(AV2_COMP *cpi, int width,
   // Work out how big we would have expected the frame to be at this Q given
   // the current correction factor.
   // Stay in double to avoid int overflow when values are large
+  const int qindex = (cpi->sf.rt_sf.rtc_enable_bru && cm->bru.enabled &&
+                      cm->bru.frame_inactive_flag)
+                         ? cpi->rc.bru_rtc_picked_q
+                         : cm->quant_params.base_qindex;
   if (cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ && cpi->common.seg.enabled) {
     projected_size_based_on_q =
         av2_cyclic_refresh_estimate_bits_at_q(cpi, rate_correction_factor);
   } else {
     projected_size_based_on_q = av2_estimate_bits_at_q(
-        cm->current_frame.frame_type, cm->quant_params.base_qindex, MBs,
-        rate_correction_factor, cm->seq_params.bit_depth,
-        cpi->is_screen_content_type);
+        cm->current_frame.frame_type, qindex, MBs, rate_correction_factor,
+        cm->seq_params.bit_depth, cpi->is_screen_content_type);
   }
   // Work out a size correction factor.
   if (projected_size_based_on_q > FRAME_OVERHEAD_BITS)
@@ -649,7 +652,7 @@ void av2_rc_update_rate_correction_factors(AV2_COMP *cpi, int width,
   }
 
   cpi->rc.q_2_frame = cpi->rc.q_1_frame;
-  cpi->rc.q_1_frame = cm->quant_params.base_qindex;
+  cpi->rc.q_1_frame = qindex;
   cpi->rc.rc_2_frame = cpi->rc.rc_1_frame;
   if (correction_factor > 110)
     cpi->rc.rc_1_frame = -1;
@@ -1805,6 +1808,7 @@ int av2_rc_pick_q_and_bounds(const AV2_COMP *cpi, RATE_CONTROL *rc, int width,
   if (gf_group->update_type[gf_index] == ARF_UPDATE ||
       gf_group->update_type[gf_index] == KFFLT_UPDATE)
     rc->level1_qp = q;
+  if (cpi->sf.rt_sf.rtc_enable_bru) rc->bru_rtc_picked_q = q;
   if ((cpi->common.bru.enabled && cpi->common.bru.frame_inactive_flag) ||
       cpi->common.bridge_frame_info.is_bridge_frame) {
     q = cpi->common.quant_params.base_qindex;
@@ -1877,7 +1881,10 @@ void av2_rc_postencode_update(AV2_COMP *cpi, uint64_t bytes_used) {
   const int is_intrnl_arf =
       gf_group->update_type[gf_group->index] == INTNL_ARF_UPDATE;
 
-  const int qindex = cm->quant_params.base_qindex;
+  const int qindex = (cpi->sf.rt_sf.rtc_enable_bru && cm->bru.enabled &&
+                      cm->bru.frame_inactive_flag)
+                         ? rc->bru_rtc_picked_q
+                         : cm->quant_params.base_qindex;
 
   // Update rate control heuristics
   rc->projected_frame_size = (int)(bytes_used << 3);

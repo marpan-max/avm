@@ -640,14 +640,26 @@ void av2_set_quantizer(AV2_COMP *const cpi, int min_qmlevel, int max_qmlevel,
   // delta_q changes.
   CommonQuantParams *quant_params = &cm->quant_params;
 
-  quant_params->base_qindex = AVMMAX(cm->delta_q_info.delta_q_present_flag, q);
-  cm->cur_frame->base_qindex = quant_params->base_qindex;
-  set_frame_dc_delta_q(cm, &quant_params->y_dc_delta_q, enable_chroma_deltaq,
-                       &quant_params->u_dc_delta_q, &quant_params->v_dc_delta_q,
-                       &quant_params->u_ac_delta_q,
-                       &quant_params->v_ac_delta_q);
-  cm->cur_frame->u_ac_delta_q = quant_params->u_ac_delta_q;
-  cm->cur_frame->v_ac_delta_q = quant_params->v_ac_delta_q;
+  if (cpi->sf.rt_sf.rtc_enable_bru && cm->bru.enabled &&
+      cm->bru.frame_inactive_flag) {
+    int dummy_u_ac = 0, dummy_v_ac = 0;
+    cm->cur_frame->base_qindex = quant_params->base_qindex;
+    set_frame_dc_delta_q(cm, &quant_params->y_dc_delta_q, enable_chroma_deltaq,
+                         &quant_params->u_dc_delta_q,
+                         &quant_params->v_dc_delta_q, &dummy_u_ac, &dummy_v_ac);
+    cm->cur_frame->u_ac_delta_q = quant_params->u_ac_delta_q;
+    cm->cur_frame->v_ac_delta_q = quant_params->v_ac_delta_q;
+  } else {
+    quant_params->base_qindex =
+        AVMMAX(cm->delta_q_info.delta_q_present_flag, q);
+    cm->cur_frame->base_qindex = quant_params->base_qindex;
+    set_frame_dc_delta_q(
+        cm, &quant_params->y_dc_delta_q, enable_chroma_deltaq,
+        &quant_params->u_dc_delta_q, &quant_params->v_dc_delta_q,
+        &quant_params->u_ac_delta_q, &quant_params->v_ac_delta_q);
+    cm->cur_frame->u_ac_delta_q = quant_params->u_ac_delta_q;
+    cm->cur_frame->v_ac_delta_q = quant_params->v_ac_delta_q;
+  }
   if (cpi->oxcf.unit_test_cfg.frame_multi_qmatrix_unit_test == 0) {
     set_qm_params(cm, quant_params, min_qmlevel, max_qmlevel);
   } else {

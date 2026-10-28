@@ -2089,6 +2089,11 @@ typedef struct BRU_Info {
    * Store num of ranked refs in av2_get_ref_frames
    */
   int ref_n_ranked;
+  /*!
+   * Per-SB quantizer index for current frame and reference frame buffers
+   */
+  uint8_t *cur_sb_qindex;
+  uint8_t *ref_sb_qindex[REF_FRAMES];
 } BruInfo;
 
 /*!

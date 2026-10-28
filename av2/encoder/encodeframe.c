@@ -180,23 +180,26 @@ static BLOCK_SIZE get_rd_var_based_fixed_partition(AV2_COMP *cpi, MACROBLOCK *x,
     return BLOCK_8X8;
 }
 
-static unsigned int get_sb_source_sad(const AV2_COMP *cpi, const MACROBLOCK *x,
-                                      int mi_row, int mi_col) {
-  if (cpi->last_source == NULL || cpi->source == NULL) return UINT_MAX;
+unsigned int av2_get_sb_source_sad(const AV2_COMP *cpi,
+                                   const YV12_BUFFER_CONFIG *cur_src,
+                                   const YV12_BUFFER_CONFIG *last_src,
+                                   int mi_row, int mi_col) {
+  if (last_src == NULL || cur_src == NULL) return UINT_MAX;
   if (frame_is_intra_only(&cpi->common)) return UINT_MAX;
-  if (cpi->last_source->y_width != cpi->source->y_width ||
-      cpi->last_source->y_height != cpi->source->y_height)
+  if (last_src->y_width != cur_src->y_width ||
+      last_src->y_height != cur_src->y_height)
     return UINT_MAX;
 
   const BLOCK_SIZE sb_size = cpi->common.seq_params.sb_size;
   const int block_width = mi_size_wide[sb_size];
   const int block_height = mi_size_high[sb_size];
-  const uint16_t *src_y = x->plane[AVM_PLANE_Y].src.buf;
-  const int src_stride = x->plane[AVM_PLANE_Y].src.stride;
+  const int src_stride = cur_src->y_stride;
+  const int src_offset = (mi_row * MI_SIZE) * src_stride + (mi_col * MI_SIZE);
+  const uint16_t *src_y = cur_src->y_buffer + src_offset;
+  const int last_src_stride = last_src->y_stride;
   const int last_src_offset =
-      (mi_row * MI_SIZE) * cpi->last_source->y_stride + (mi_col * MI_SIZE);
-  const uint16_t *last_src_y = cpi->last_source->y_buffer + last_src_offset;
-  const int last_src_stride = cpi->last_source->y_stride;
+      (mi_row * MI_SIZE) * last_src_stride + (mi_col * MI_SIZE);
+  const uint16_t *last_src_y = last_src->y_buffer + last_src_offset;
 
   if (mi_row + block_height <= cpi->common.mi_params.mi_rows &&
       mi_col + block_width <= cpi->common.mi_params.mi_cols) {
@@ -222,12 +225,16 @@ static unsigned int get_sb_source_sad(const AV2_COMP *cpi, const MACROBLOCK *x,
       sum_sad += abs((int)s[c] - (int)ls[c]);
     }
   }
+  if (sum_sad == 0) return 0;
 
   const uint64_t total_sb_pix = (uint64_t)sb_pix_w * sb_pix_h;
   const uint64_t valid_pix = (uint64_t)valid_w * valid_h;
   uint64_t norm_sad = (sum_sad * total_sb_pix + (valid_pix >> 1)) / valid_pix;
   if (cpi->common.seq_params.bit_depth > 8) {
     norm_sad >>= (cpi->common.seq_params.bit_depth - 8);
+  }
+  if (cpi->sf.rt_sf.rtc_enable_bru) {
+    return AVMMAX((unsigned int)norm_sad, 1u);
   }
   return (unsigned int)norm_sad;
 }
@@ -1039,7 +1046,8 @@ static AVM_INLINE void encode_rd_sb(AV2_COMP *cpi, ThreadData *td,
     av2_set_offsets(cpi, tile_info, x, mi_row, mi_col, sb_size, NULL);
     unsigned int source_sad = UINT_MAX;
     if (cpi->sf.rt_sf.source_metrics_sb) {
-      source_sad = get_sb_source_sad(cpi, x, mi_row, mi_col);
+      source_sad = av2_get_sb_source_sad(cpi, cpi->source, cpi->last_source,
+                                         mi_row, mi_col);
     }
     x->source_sad = source_sad;
     x->source_sad_level = get_source_sad_level(source_sad, sb_size);

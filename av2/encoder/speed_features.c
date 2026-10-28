@@ -928,6 +928,27 @@ static void set_rt_speed_features_framesize_independent(
       sf->intra_sf.skip_intra_in_interframe = 1;
       sf->rt_sf.prune_intra_mode_in_interframe = 1;
     }
+    // Enable BRU for RTC at speed >= 6 when lookahead lag is 0, keyframes are
+    // not all-intra, resize is off, and both dpb_size and max_reference_frames
+    // are at least 3.
+    // Note: BRU cannot work when dpb_size < 3 because the BRU reference frame
+    // is at distance 2 (cur_frame_disp - 2, since
+    // BRU_ENC_LOOKAHEAD_DIST_MINUS_1 = 1) and get_refresh_idx() preserves the 2
+    // closest past frames in output order (frame_order > cur_frame_disp - 3),
+    // requiring at least 3 DPB slots so a slot with
+    // frame_order <= cur_frame_disp - 3 is available to refresh on non-BRU
+    // frames. BRU also cannot work when max_reference_frames < 3 because
+    // bru_is_valid_inter() forbids BRU_ACTIVE_SB blocks from using
+    // update_ref_idx (cur_frame_disp - 2) as an inter reference, so at least 3
+    // reference frames are needed to ensure update_ref_idx is in the active
+    // reference list while leaving coding references for BRU_ACTIVE_SB blocks.
+    if (cpi->oxcf.gf_cfg.lag_in_frames == 0 &&
+        cpi->oxcf.kf_cfg.key_freq_max > 0 &&
+        cpi->oxcf.resize_cfg.resize_mode == RESIZE_NONE &&
+        cpi->oxcf.tool_cfg.dpb_size >= 3 &&
+        cpi->oxcf.ref_frm_cfg.max_reference_frames >= 3) {
+      sf->rt_sf.rtc_enable_bru = 1;
+    }
   }
 }
 
@@ -1294,6 +1315,7 @@ static AVM_INLINE void init_rt_sf(REALTIME_SPEED_FEATURES *rt_sf) {
   rt_sf->check_scene_detection = 0;
   rt_sf->overshoot_detection_cbr = NO_DETECTION;
   rt_sf->estimate_motion_for_var_based_partition = 0;
+  rt_sf->rtc_enable_bru = 0;
 }
 
 // Speed >= 6 partition search breakout tuning: left shift applied to the
@@ -1587,6 +1609,11 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
   }
 
   if (!cpi->seq_params_locked) {
+    if (sf->rt_sf.rtc_enable_bru &&
+        !cpi->common.seq_params.single_picture_header_flag) {
+      cpi->common.seq_params.enable_bru = 1;
+      cpi->common.seq_params.tile_params.allow_tile_info_change = 1;
+    }
     cpi->common.seq_params.enable_tip_refinemv =
         cpi->oxcf.tool_cfg.enable_tip_refinemv;
     cpi->common.seq_params.enable_restoration &= !sf->lpf_sf.disable_lr_filter;
@@ -1634,6 +1661,9 @@ void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
 
     if (cpi->common.seq_params.enable_restoration)
       av2_set_seq_lr_tools_mask(&cpi->common.seq_params, oxcf);
+  }
+  if (sf->rt_sf.rtc_enable_bru && cpi->common.seq_params.enable_bru) {
+    cpi->oxcf.tool_cfg.enable_bru = 1;
   }
 
   // sf->part_sf.partition_search_breakout_dist_thr is set assuming max 64x64

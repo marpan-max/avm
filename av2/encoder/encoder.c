@@ -1474,6 +1474,9 @@ void av2_change_config(struct AV2_COMP *cpi, const AV2EncoderConfig *oxcf) {
   // This should not be called after the first key frame.
   if (!cpi->seq_params_locked) {
     av2_init_seq_coding_tools(cpi, &cm->seq_params, cm, oxcf);
+    if (oxcf->mode == REALTIME) {
+      av2_set_speed_features_framesize_independent(cpi, oxcf->speed);
+    }
   }
 
   // restore the value of lag_in_frame for LAP stage.
@@ -3780,6 +3783,10 @@ static int encode_without_recode(AV2_COMP *cpi) {
 
   set_size_independent_vars(cpi);
   av2_setup_frame_size(cpi);
+  if (cpi->sf.rt_sf.rtc_enable_bru &&
+      (cm->seq_params.enable_explicit_ref_frame_map || frame_is_sframe(cm))) {
+    enc_bru_swap_ref(cm);
+  }
   av2_set_size_dependent_vars(cpi, &q, &bottom_index, &top_index);
 
   {
@@ -3871,9 +3878,13 @@ static int encode_without_recode(AV2_COMP *cpi) {
   av2_setup_frame(cpi);
 
   if (q_cfg->aq_mode == CYCLIC_REFRESH_AQ) {
-    suppress_active_map(cpi);
-    av2_cyclic_refresh_setup(cpi);
-    av2_apply_active_map(cpi);
+    if (!(cpi->sf.rt_sf.rtc_enable_bru && cm->bru.enabled)) {
+      suppress_active_map(cpi);
+      av2_cyclic_refresh_setup(cpi);
+      av2_apply_active_map(cpi);
+    } else {
+      av2_disable_segmentation(&cm->seg);
+    }
   }
   if (cm->seg.enabled) {
     if (!cm->seg.update_data && cm->prev_frame) {
@@ -3888,6 +3899,27 @@ static int encode_without_recode(AV2_COMP *cpi) {
   cm->seg.enable_ext_seg = cm->seq_params.enable_ext_seg;
   segfeatures_copy(&cm->cur_frame->seg, &cm->seg);
   cm->cur_frame->seg.enabled = cm->seg.enabled;
+
+  if (cpi->sf.rt_sf.rtc_enable_bru && cm->seq_params.enable_bru &&
+      cm->bru.cur_sb_qindex != NULL) {
+    const int unit_rows = cm->bru.unit_rows;
+    const int unit_cols = cm->bru.unit_cols;
+    const int unit_size = cm->seq_params.mib_size;
+    for (int r = 0, mi_row = 0, u = 0; r < unit_rows;
+         r++, mi_row += unit_size) {
+      for (int c = 0, mi_col = 0; c < unit_cols;
+           c++, u++, mi_col += unit_size) {
+        int q_sb = cm->quant_params.base_qindex;
+        if (cm->seg.enabled && cpi->enc_seg.map != NULL) {
+          const int seg_id =
+              cpi->enc_seg.map[mi_row * cm->mi_params.mi_cols + mi_col];
+          q_sb = av2_get_qindex(&cm->seg, seg_id, cm->quant_params.base_qindex,
+                                cm->seq_params.bit_depth);
+        }
+        cm->bru.cur_sb_qindex[u] = (uint8_t)clamp(q_sb, 0, 255);
+      }
+    }
+  }
 
 #if CONFIG_COLLECT_COMPONENT_TIMING
   start_timing(cpi, av2_encode_frame_time);
@@ -3912,8 +3944,101 @@ static int encode_without_recode(AV2_COMP *cpi) {
   // transform / motion compensation build reconstruction frame
   av2_encode_frame(cpi);
 
+  if (cpi->sf.rt_sf.rtc_enable_bru && cm->seq_params.enable_bru &&
+      cm->bru.cur_sb_qindex != NULL && !frame_is_intra_only(cm)) {
+    if (cm->bru.enabled && cm->bru.frame_inactive_flag) {
+      if (cm->bru.explicit_ref_idx >= 0 &&
+          cm->bru.explicit_ref_idx < REF_FRAMES) {
+        memcpy(cm->bru.cur_sb_qindex,
+               cm->bru.ref_sb_qindex[cm->bru.explicit_ref_idx],
+               cm->bru.total_units);
+      }
+    } else {
+      const int unit_rows = cm->bru.unit_rows;
+      const int unit_cols = cm->bru.unit_cols;
+      const int unit_size = cm->seq_params.mib_size;
+      for (int r = 0, mi_row = 0, u = 0; r < unit_rows;
+           r++, mi_row += unit_size) {
+        for (int c = 0, mi_col = 0; c < unit_cols;
+             c++, u++, mi_col += unit_size) {
+          if (cm->bru.enabled &&
+              enc_get_cur_sb_active_mode(cm, mi_col, mi_row) != BRU_ACTIVE_SB) {
+            if (cm->bru.explicit_ref_idx >= 0 &&
+                cm->bru.explicit_ref_idx < REF_FRAMES) {
+              cm->bru.cur_sb_qindex[u] =
+                  cm->bru.ref_sb_qindex[cm->bru.explicit_ref_idx][u];
+            }
+          } else {
+            const int q_init = cm->bru.cur_sb_qindex[u];
+            const int ymis = AVMMIN(cm->mi_params.mi_rows - mi_row, unit_size);
+            const int xmis = AVMMIN(cm->mi_params.mi_cols - mi_col, unit_size);
+            bool has_coded_txfm = false;
+            int min_q_coded = 255;
+            for (int y = 0; y < ymis; y += 2) {
+              for (int x_idx = 0; x_idx < xmis; x_idx += 2) {
+                const MB_MODE_INFO *const b_mbmi =
+                    cm->mi_params
+                        .mi_grid_base[(mi_row + y) * cm->mi_params.mi_stride +
+                                      (mi_col + x_idx)];
+                if (b_mbmi != NULL && !b_mbmi->skip_txfm[0]) {
+                  has_coded_txfm = true;
+                  const int b_q =
+                      clamp(cm->seg.enabled
+                                ? av2_get_qindex(&cm->seg, b_mbmi->segment_id,
+                                                 cm->quant_params.base_qindex,
+                                                 cm->seq_params.bit_depth)
+                                : cm->quant_params.base_qindex,
+                            0, 255);
+                  if (b_q < min_q_coded) min_q_coded = b_q;
+                }
+              }
+            }
+            const unsigned int sb_sad = av2_get_sb_source_sad(
+                cpi, cpi->source, cpi->last_source, mi_row, mi_col);
+            if (sb_sad > 0) {
+              const int q_coded =
+                  has_coded_txfm ? min_q_coded
+                                 : clamp(cm->quant_params.base_qindex, 0, 255);
+              cm->bru.cur_sb_qindex[u] = (uint8_t)q_coded;
+            } else {
+              const MV_REFERENCE_FRAME default_ref =
+                  get_closest_pastcur_ref_or_ref0(cm);
+              int ref_slot = get_ref_frame_map_idx(cm, default_ref);
+              const MB_MODE_INFO *const mbmi =
+                  cm->mi_params
+                      .mi_grid_base[mi_row * cm->mi_params.mi_stride + mi_col];
+              if (mbmi != NULL && mbmi->ref_frame[0] >= 0 &&
+                  mbmi->ref_frame[0] < INTER_REFS_PER_FRAME) {
+                const int slot = get_ref_frame_map_idx(cm, mbmi->ref_frame[0]);
+                if (slot >= 0 && slot < REF_FRAMES) ref_slot = slot;
+              }
+              const int q_prev = (ref_slot >= 0 && ref_slot < REF_FRAMES)
+                                     ? cm->bru.ref_sb_qindex[ref_slot][u]
+                                     : 255;
+              int q_coded = clamp(cm->quant_params.base_qindex, 0, 255);
+              if (q_init < cm->quant_params.base_qindex) {
+                q_coded = has_coded_txfm ? AVMMIN(q_init, min_q_coded) : q_init;
+              } else if (has_coded_txfm) {
+                q_coded = min_q_coded;
+              }
+              if (!cm->bru.enabled &&
+                  cm->quant_params.base_qindex > q_prev + 32) {
+                cm->bru.cur_sb_qindex[u] =
+                    (uint8_t)clamp(cm->quant_params.base_qindex, 0, 255);
+              } else {
+                cm->bru.cur_sb_qindex[u] = (uint8_t)AVMMIN(q_coded, q_prev);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Update some stats from cyclic refresh.
-  if (q_cfg->aq_mode == CYCLIC_REFRESH_AQ) av2_cyclic_refresh_postencode(cpi);
+  if (q_cfg->aq_mode == CYCLIC_REFRESH_AQ &&
+      !(cpi->sf.rt_sf.rtc_enable_bru && cm->bru.enabled))
+    av2_cyclic_refresh_postencode(cpi);
 
 #if CONFIG_COLLECT_COMPONENT_TIMING
   end_timing(cpi, av2_encode_frame_time);
@@ -5406,6 +5531,21 @@ static int encode_frame_to_data_rate(AV2_COMP *cpi, size_t *size, uint8_t *dest,
       cm->immediate_output_picture) {
     av2_decoder_model_check_output_frame_for_operating_points(cpi, -1,
                                                               cm->cur_frame);
+  }
+
+  if (cpi->sf.rt_sf.rtc_enable_bru && cm->seq_params.enable_bru &&
+      cm->bru.cur_sb_qindex != NULL) {
+    for (int i = 0; i < cm->seq_params.ref_frames; ++i) {
+      if ((cm->current_frame.refresh_frame_flags >> i) & 1) {
+        memcpy(cm->bru.ref_sb_qindex[i], cm->bru.cur_sb_qindex,
+               cm->bru.total_units);
+      }
+    }
+    if (cm->bru.enabled && cm->bru.explicit_ref_idx >= 0 &&
+        cm->bru.explicit_ref_idx < REF_FRAMES) {
+      memcpy(cm->bru.ref_sb_qindex[cm->bru.explicit_ref_idx],
+             cm->bru.cur_sb_qindex, cm->bru.total_units);
+    }
   }
 
   refresh_reference_frames(cpi);
