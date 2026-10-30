@@ -419,7 +419,7 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
   int max_delta_down;
   int max_delta_up;
   if (cpi->is_screen_content_type) {
-    max_delta_up = overshoot_buffer_low ? 120 : 16;
+    max_delta_up = overshoot_buffer_low ? 32 : 16;
     if (cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ &&
         cpi->cyclic_refresh->apply_cyclic_refresh) {
       // For static screen type content limit the Q drop till the start of the
@@ -494,6 +494,10 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
         const double q_adj_factor = 1.0 + 0.5 * tanh(4.0 * delta);
         const double q_val = av2_convert_qindex_to_q(q, bit_depth);
         q += av2_compute_qdelta(rc, q_val, q_val * q_adj_factor, bit_depth);
+      } else if (cpi->is_screen_content_type && delta < 0.0 &&
+                 rc->frames_since_key <= 20 && rc->frame_source_sad < 4000 &&
+                 rc->buffer_level < -rc->optimal_buffer_level) {
+        q = AVMMIN(q - 16, rc->q_1_frame - 10);
       } else if (rc->q_1_frame - q > 0 && delta > 0.1 &&
                  rc->buffer_level < AVMMIN(rc->maximum_buffer_size,
                                            rc->optimal_buffer_level << 1)) {
@@ -967,6 +971,13 @@ static int calc_active_worst_quality_no_stats_cbr(const AV2_COMP *cpi) {
     // Set to worst_quality if buffer is below critical level.
     active_worst_quality = rc->worst_quality;
   }
+  // For screen content on low-SAD frames right after the initial keyframe,
+  // cap active_worst_quality at ambient_qp so Q does not jump excessively.
+  if (cpi->is_screen_content_type && cm->current_frame.frame_number < 5 &&
+      ambient_qp > 100 && rc->frame_source_sad < 2000 &&
+      rc->buffer_level > -rc->optimal_buffer_level) {
+    active_worst_quality = AVMMIN(active_worst_quality, ambient_qp);
+  }
   return active_worst_quality;
 }
 
@@ -1030,6 +1041,12 @@ static int calc_active_best_quality_no_stats_cbr(const AV2_COMP *cpi,
       active_best_quality = rtc_minq[rc->avg_frame_qindex[frame_type]];
     else
       active_best_quality = rtc_minq[active_worst_quality];
+    // For screen content, allow lower active_best_quality on low-SAD frames
+    // when recovering from a keyframe or a high-SAD scene change.
+    if (cpi->is_screen_content_type && rc->avg_frame_qindex[frame_type] < 130 &&
+        rc->frame_source_sad < 2000 && active_best_quality > 64 &&
+        (rc->frames_since_key < 100 || rc->avg_source_sad > 5000))
+      active_best_quality = AVMMAX(active_best_quality * 3 / 4, 64);
   }
   if (rc->buffer_level > rc->optimal_buffer_level) {
     int max_adjustment_down = (active_best_quality - rc->best_quality) / 2;
@@ -2314,12 +2331,10 @@ int av2_calc_iframe_target_size_one_pass_cbr(const AV2_COMP *cpi) {
   const RATE_CONTROL *rc = &cpi->rc;
   int target;
   if (cpi->common.current_frame.frame_number == 0) {
-    // In realtime mode, use a smaller initial keyframe target for non-screen
-    // content so less buffer budget is consumed on the first frame.
-    const int factor =
-        (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN) ? 7 : 3;
+    // In realtime mode, use a smaller initial keyframe target so less buffer
+    // budget is consumed on the first frame.
     const int64_t initial_target = (cpi->oxcf.mode == REALTIME)
-                                       ? rc->starting_buffer_level * factor / 2
+                                       ? rc->starting_buffer_level * 3 / 2
                                        : rc->starting_buffer_level / 2;
     target = (initial_target > INT_MAX) ? INT_MAX : (int)initial_target;
   } else {
