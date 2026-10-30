@@ -411,15 +411,16 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
   const bool overshoot_buffer_low =
       (rc->rc_1_frame == -1 && rc->frame_source_sad > 1000 &&
        rc->buffer_level < (rc->optimal_buffer_level >> 1) &&
-       rc->frames_since_key > 4);
+       rc->frames_since_key > (cpi->is_screen_content_type ? 60 : 4) &&
+       !(cpi->is_screen_content_type && rc->high_source_sad));
   // Scale maximum Q decrease with previous frame Q so Q drops more gradually
-  // at low Q indices, avoiding sudden bit spikes. For non-screen content,
-  // allow a larger max_delta_down and a moderate max_delta_up on low-buffer
-  // overshoot so Q can adapt faster after the keyframe without over-clamping.
+  // at low Q indices, avoiding sudden bit spikes, while keeping a tighter cap
+  // for <= 720p screen content. Use a moderate max_delta_up on low-buffer
+  // overshoot so Q can adapt faster without over-clamping.
   int max_delta_down;
   int max_delta_up;
   if (cpi->is_screen_content_type) {
-    max_delta_up = overshoot_buffer_low ? 120 : 16;
+    max_delta_up = overshoot_buffer_low ? 48 : 16;
     if (cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ &&
         cpi->cyclic_refresh->apply_cyclic_refresh) {
       // For static screen type content limit the Q drop till the start of the
@@ -438,7 +439,10 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
     } else {
       max_delta_down = cm->width * cm->height <= 1280 * 720
                            ? clamp(rc->q_1_frame / 32, 1, 4)
-                           : clamp(rc->q_1_frame / 8, 1, 16);
+                       : !((rc->frames_since_key < 60 && rc->q_1_frame > 64) ||
+                           rc->q_1_frame > 96)
+                           ? clamp(rc->q_1_frame / 8, 1, 16)
+                           : clamp(rc->q_1_frame / 4, 1, 32);
     }
   } else {
     max_delta_down = clamp(rc->q_1_frame / 4, 1, 32);
@@ -464,6 +468,15 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
   if (cm->current_frame.frame_type != KEY_FRAME && rc->frames_since_key > 1 &&
       rc->q_1_frame > 0 && rc->q_2_frame > 0 && !change_target_bits_mb &&
       (!cpi->oxcf.rc_cfg.gf_cbr_boost_pct || (level > 1))) {
+    const bool step_down_screen =
+        cpi->is_screen_content_type && rc->avg_source_sad < 15000 &&
+        rc->q_1_frame > 64 &&
+        ((rc->frames_since_key < 60 &&
+          (rc->frame_source_sad < 100 ||
+           (rc->frame_source_sad < 1200 &&
+            rc->buffer_level > (rc->optimal_buffer_level >> 1)))) ||
+         (rc->frame_source_sad == 0 &&
+          rc->buffer_level < -(rc->optimal_buffer_level << 1)));
     // If in the previous two frames we have seen both overshoot and undershoot
     // clamp Q between the two.
     if (rc->rc_1_frame * rc->rc_2_frame == -1 &&
@@ -473,7 +486,10 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
       // If the previous frame had overshoot and the current q needs to
       // increase above the clamped value, reduce the clamp for faster reaction
       // to overshoot.
-      if (rc->rc_1_frame == -1 && q > qclamp && rc->frames_since_key > 10)
+      if (rc->rc_1_frame == -1 && q > qclamp && rc->frames_since_key > 10 &&
+          !(cpi->is_screen_content_type && rc->frames_since_key < 60 &&
+            rc->q_1_frame > 64 && rc->frame_source_sad < 100 &&
+            rc->buffer_level > 0))
         q = (q + qclamp) >> 1;
       else
         q = qclamp;
@@ -500,13 +516,25 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
         q = (3 * q + rc->q_1_frame) >> 2;
       }
     }
-    // For non-screen content in the early frames after a keyframe, allow Q to
-    // step down faster after an overshoot when motion is low and non-zero, and
-    // not recovering from a high-SAD scene cut.
-    if (rc->avg_source_sad > 0 && rc->frame_source_sad < 10000 &&
-        rc->avg_source_sad < 15000 && rc->rc_1_frame == -1 &&
-        rc->frames_since_key < 60 && !cpi->is_screen_content_type) {
-      q -= 16;
+    // Allow Q to step down faster in the early frames after a keyframe or
+    // after a slide change when motion is low.
+    if (cpi->is_screen_content_type && cm->width * cm->height > 1280 * 720 &&
+        rc->frames_since_key <= 20 && rc->avg_source_sad > 0 &&
+        rc->avg_source_sad < 10000 &&
+        ((rc->q_1_frame > AVMMIN(96, rc->last_kf_qindex - 18) &&
+          rc->frame_source_sad < 1200) ||
+         (rc->frames_since_key > 10 &&
+          rc->q_1_frame > AVMMIN(76, rc->last_kf_qindex - 32) &&
+          rc->frame_source_sad < 4000))) {
+      q = AVMMIN(q - 16, rc->q_1_frame - 10);
+    } else if (rc->rc_1_frame == -1 &&
+               (cpi->is_screen_content_type
+                    ? step_down_screen
+                    : (rc->avg_source_sad > 0 && rc->frame_source_sad < 10000 &&
+                       rc->avg_source_sad < 15000 &&
+                       rc->frames_since_key < 60))) {
+      q = cpi->is_screen_content_type ? AVMMIN(q - 16, rc->q_1_frame - 8)
+                                      : q - 16;
     }
     // Gentle adjustment to Q when cyclic refresh was active on previous frame
     // and blocks were refreshed, and no scene cut or high motion, and buffer
@@ -2314,12 +2342,10 @@ int av2_calc_iframe_target_size_one_pass_cbr(const AV2_COMP *cpi) {
   const RATE_CONTROL *rc = &cpi->rc;
   int target;
   if (cpi->common.current_frame.frame_number == 0) {
-    // In realtime mode, use a smaller initial keyframe target for non-screen
-    // content so less buffer budget is consumed on the first frame.
-    const int factor =
-        (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN) ? 7 : 3;
+    // In realtime mode, use a smaller initial keyframe target so less buffer
+    // budget is consumed on the first frame.
     const int64_t initial_target = (cpi->oxcf.mode == REALTIME)
-                                       ? rc->starting_buffer_level * factor / 2
+                                       ? rc->starting_buffer_level * 3 / 2
                                        : rc->starting_buffer_level / 2;
     target = (initial_target > INT_MAX) ? INT_MAX : (int)initial_target;
   } else {
