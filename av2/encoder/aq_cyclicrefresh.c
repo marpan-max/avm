@@ -137,14 +137,9 @@ int av2_cyclic_refresh_rc_bits_per_mb(const AV2_COMP *cpi, int i,
   const AV2_COMMON *const cm = &cpi->common;
   CYCLIC_REFRESH *const cr = cpi->cyclic_refresh;
   int bits_per_mb;
-  int num4x4bl = cm->mi_params.MBs << 4;
-  // Weight for segment prior to encoding: take the average of the target
-  // number for the frame to be encoded and the actual from the previous frame.
-  double weight_segment =
-      (double)((cr->target_num_seg_blocks + cr->actual_num_seg1_blocks +
-                cr->actual_num_seg2_blocks) >>
-               1) /
-      num4x4bl;
+  // Weight for segment prior to encoding: computed in
+  // av2_cyclic_refresh_update_parameters().
+  const double weight_segment = cr->weight_segment;
   // Compute delta-q corresponding to qindex i.
   int deltaq = compute_deltaq(cpi, i, cr->rate_ratio_qdelta);
   // Take segment weighted average for bits per mb.

@@ -410,8 +410,14 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
   // oscillation clamp below so Q can increase rapidly.
   const bool overshoot_buffer_low =
       (rc->rc_1_frame == -1 && rc->frame_source_sad > 1000 &&
+       !(cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ &&
+         cpi->sf.rt_sf.overshoot_detection_cbr == FAST_DETECTION_MAXQ &&
+         rc->high_source_sad) &&
        rc->buffer_level < (rc->optimal_buffer_level >> 1) &&
-       rc->frames_since_key > 4);
+       rc->frames_since_key > ((cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ &&
+                                cpi->is_screen_content_type)
+                                   ? 60
+                                   : 4));
   // Scale maximum Q decrease with previous frame Q so Q drops more gradually
   // at low Q indices, avoiding sudden bit spikes. For non-screen content,
   // allow a larger max_delta_down and a moderate max_delta_up on low-buffer
@@ -507,6 +513,17 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
         rc->avg_source_sad < 15000 && rc->rc_1_frame == -1 &&
         rc->frames_since_key < 60 && !cpi->is_screen_content_type) {
       q -= 16;
+    } else if (cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ &&
+               cpi->cyclic_refresh->apply_cyclic_refresh &&
+               cpi->is_screen_content_type && rc->frames_since_key < 60 &&
+               rc->q_1_frame > 64 && rc->frame_source_sad < 1200 &&
+               rc->avg_source_sad < 15000 &&
+               ((rc->rc_1_frame == -1 &&
+                 rc->projected_frame_size < 2 * rc->avg_frame_bandwidth) ||
+                (cm->width * cm->height > 1280 * 720 &&
+                 rc->frames_since_key <= 20 &&
+                 rc->q_1_frame > AVMMIN(96, rc->last_kf_qindex - 18)))) {
+      q = AVMMIN(q - 16, rc->q_1_frame - max_delta_down);
     }
     // Gentle adjustment to Q when cyclic refresh was active on previous frame
     // and blocks were refreshed, and no scene cut or high motion, and buffer
@@ -921,8 +938,14 @@ static int calc_active_worst_quality_no_stats_cbr(const AV2_COMP *cpi) {
                             rc->avg_frame_qindex[KEY_FRAME])
                    : rc->avg_frame_qindex[INTER_FRAME];
   ambient_qp = AVMMIN(rc->worst_quality, ambient_qp);
-
-  if (rc->buffer_level > rc->optimal_buffer_level) {
+  const bool early_post_kf_cr = cm->current_frame.frame_number < 5 &&
+                                cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ &&
+                                cpi->is_screen_content_type &&
+                                cpi->cyclic_refresh->apply_cyclic_refresh;
+  const int64_t buffer_level =
+      early_post_kf_cr ? AVMMAX(rc->buffer_level, rc->optimal_buffer_level >> 1)
+                       : rc->buffer_level;
+  if (buffer_level > rc->optimal_buffer_level) {
     // Adjust down.
     int max_adjustment_down;
     if (cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ &&
@@ -937,26 +960,27 @@ static int calc_active_worst_quality_no_stats_cbr(const AV2_COMP *cpi) {
       buff_lvl_step = ((rc->maximum_buffer_size - rc->optimal_buffer_level) /
                        max_adjustment_down);
       if (buff_lvl_step)
-        adjustment = (int)((rc->buffer_level - rc->optimal_buffer_level) /
-                           buff_lvl_step);
+        adjustment =
+            (int)((buffer_level - rc->optimal_buffer_level) / buff_lvl_step);
       active_worst_quality -= adjustment;
     }
-  } else if (rc->buffer_level > critical_level) {
+  } else if (buffer_level > critical_level) {
     // Adjust up from ambient Q towards worst_quality as buffer drains from
     // optimal_buffer_level to critical_level.
     if (critical_level) {
       buff_lvl_step = (rc->optimal_buffer_level - critical_level);
       if (buff_lvl_step) {
-        adjustment = (int)((rc->worst_quality - ambient_qp) *
-                           (rc->optimal_buffer_level - rc->buffer_level) /
-                           buff_lvl_step);
+        adjustment =
+            (int)((rc->worst_quality - ambient_qp) *
+                  (rc->optimal_buffer_level - buffer_level) / buff_lvl_step);
       }
       if (cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ &&
-          cpi->cyclic_refresh->apply_cyclic_refresh &&
-          (cpi->cyclic_refresh->actual_num_seg1_blocks > 0 ||
-           cpi->cyclic_refresh->actual_num_seg2_blocks > 0) &&
-          rc->frames_since_key > 4 &&
-          rc->buffer_level > (rc->optimal_buffer_level >> 1)) {
+          (early_post_kf_cr ||
+           (cpi->cyclic_refresh->apply_cyclic_refresh &&
+            (cpi->cyclic_refresh->actual_num_seg1_blocks > 0 ||
+             cpi->cyclic_refresh->actual_num_seg2_blocks > 0) &&
+            rc->frames_since_key > 4 &&
+            buffer_level > (rc->optimal_buffer_level >> 1)))) {
         adjustment >>= 1;
       }
       active_worst_quality = ambient_qp + adjustment;
@@ -2315,9 +2339,12 @@ int av2_calc_iframe_target_size_one_pass_cbr(const AV2_COMP *cpi) {
   int target;
   if (cpi->common.current_frame.frame_number == 0) {
     // In realtime mode, use a smaller initial keyframe target for non-screen
-    // content so less buffer budget is consumed on the first frame.
-    const int factor =
-        (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN) ? 7 : 3;
+    // content or cyclic refresh AQ so less buffer budget is consumed on the
+    // first frame.
+    const int factor = (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN &&
+                        cpi->oxcf.q_cfg.aq_mode != CYCLIC_REFRESH_AQ)
+                           ? 7
+                           : 3;
     const int64_t initial_target = (cpi->oxcf.mode == REALTIME)
                                        ? rc->starting_buffer_level * factor / 2
                                        : rc->starting_buffer_level / 2;

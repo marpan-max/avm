@@ -1716,6 +1716,9 @@ static void encode_b(const AV2_COMP *const cpi, TileDataEnc *tile_data,
   MB_MODE_INFO *mbmi = xd->mi[0];
   mbmi->partition = partition;
   av2_update_state(cpi, td, ctx, mi_row, mi_col, bsize, dry_run);
+  if (cpi->oxcf.q_cfg.aq_mode == CYCLIC_REFRESH_AQ) {
+    setup_block_rdmult(cpi, x, mi_row, mi_col, bsize, CYCLIC_REFRESH_AQ, mbmi);
+  }
   mbmi->local_rest_type = 1;      // for SW it only matter 0 or 1
   mbmi->local_ccso_blk_flag = 1;  // for SW it only matter 0 or 1
   mbmi->local_gdf_mode = 1;       // for SW it only matter 0 or 1
