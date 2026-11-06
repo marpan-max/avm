@@ -1509,6 +1509,14 @@ typedef struct REALTIME_SPEED_FEATURES {
   // 0: Disabled
   // 1: Enabled
   int rtc_enable_bru;
+
+  // For nonrd_use_partition with variance-based partitioning: refine the
+  // partition with rd checks (see av2_nonrd_check_partition_merge_split()):
+  // splitting a PARTITION_NONE block with large prediction residual, and
+  // merging a leaf 4-way split of inter skip blocks.
+  // 0: Disabled
+  // 1: Enabled
+  int nonrd_check_partition_merge_split;
 } REALTIME_SPEED_FEATURES;
 
 typedef struct LC_DEC_SPEED_FEATURES {

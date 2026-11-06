@@ -1033,6 +1033,7 @@ static void set_rt_speed_features_framesize_independent(
     sf->part_sf.partition_search_type = VAR_BASED_PARTITION;
     sf->rd_sf.tx_domain_dist_thres_level = 2;
     sf->rt_sf.use_nonrd_partition = 1;
+    sf->rt_sf.nonrd_check_partition_merge_split = 1;
     sf->rt_sf.source_metrics_sb = 1;
     sf->rt_sf.disable_primary_ref_frame_search = 1;
     sf->rt_sf.estimate_motion_for_var_based_partition = 1;
@@ -1436,6 +1437,7 @@ static AVM_INLINE void init_lc_sf(LC_DEC_SPEED_FEATURES *lc_sf) {
 
 static AVM_INLINE void init_rt_sf(REALTIME_SPEED_FEATURES *rt_sf) {
   rt_sf->use_nonrd_partition = 0;
+  rt_sf->nonrd_check_partition_merge_split = 0;
   rt_sf->prune_intra_mode_in_interframe = 0;
   rt_sf->source_metrics_sb = 0;
   rt_sf->disable_primary_ref_frame_search = 0;

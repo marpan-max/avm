@@ -41,6 +41,7 @@
 #include "av2/encoder/reconinter_enc.h"
 #include "av2/encoder/tokenize.h"
 #include "av2/encoder/tx_search.h"
+#include "av2/encoder/var_based_part.h"
 #include "av2/common/reconinter.h"
 
 #include "avm_util/debug_util.h"
@@ -2545,6 +2546,47 @@ static void init_partition_costs(const AV2_COMMON *const cm,
   }
 }
 
+// Wrappers that expose the mode search, block encoding, and partition cost
+// helpers to the partition merge/split checks for nonrd_use_partition (see
+// av2_nonrd_check_partition_merge_split() in var_based_part.c).
+void av2_nonrd_part_pick_sb_modes(AV2_COMP *const cpi, ThreadData *td,
+                                  TileDataEnc *tile_data, MACROBLOCK *const x,
+                                  int mi_row, int mi_col, RD_STATS *rd_cost,
+                                  const PC_TREE *pc_tree, BLOCK_SIZE bsize,
+                                  PICK_MODE_CONTEXT *ctx, int64_t best_rdcost) {
+  RD_STATS best_rd;
+  av2_invalid_rd_stats(&best_rd);
+  if (best_rdcost != INT64_MAX) {
+    // Express the bound as pure distortion so it is independent of rdmult.
+    best_rd.rate = 0;
+    best_rd.dist = best_rdcost >> RDDIV_BITS;
+    best_rd.rdcost = RDCOST(x->rdmult, 0, best_rd.dist);
+  }
+  pick_sb_modes(cpi, td, tile_data, x, mi_row, mi_col, rd_cost,
+                pc_tree->region_type, pc_tree->sb_root_partition_info, bsize,
+                ctx, best_rd, SB_SINGLE_PASS, NULL,
+                /*skip_inter_modes_by_none_part=*/false);
+}
+
+void av2_nonrd_part_encode_b(const AV2_COMP *const cpi, TileDataEnc *tile_data,
+                             ThreadData *td, TokenExtra **tp, int mi_row,
+                             int mi_col, RUN_TYPE dry_run, BLOCK_SIZE bsize,
+                             const PICK_MODE_CONTEXT *const ctx) {
+  int rate = 0;
+  encode_b(cpi, tile_data, td, tp, mi_row, mi_col, dry_run, bsize,
+           PARTITION_NONE, ctx, &rate);
+}
+
+void av2_nonrd_part_init_partition_costs(
+    const AV2_COMMON *const cm, const MACROBLOCK *const x, TREE_TYPE tree_type,
+    REGION_TYPE parent_region_type, int mi_row, int mi_col, int ssx, int ssy,
+    BLOCK_SIZE bsize, const PARTITION_TREE *ptree_luma,
+    const CHROMA_REF_INFO *chroma_ref_info, int *partition_cost) {
+  init_partition_costs(cm, x, tree_type, parent_region_type, mi_row, mi_col,
+                       ssx, ssy, bsize, ptree_luma, chroma_ref_info,
+                       partition_cost);
+}
+
 /*!\brief Fast non-RD block partition encoding.
  *
  * \ingroup partition_search
@@ -2660,6 +2702,13 @@ void av2_nonrd_use_partition(AV2_COMP *cpi, ThreadData *td,
         is_cfl_allowed_for_sdp(cm, xd, ptree_luma, PARTITION_NONE, bsize);
     ptree->is_cfl_allowed_for_this_chroma_partition = CFL_DISALLOWED_FOR_CHROMA;
   }
+
+  // Check merging leaf split partitions or splitting a NONE partition. The
+  // block is fully encoded if this returns true.
+  if (av2_nonrd_check_partition_merge_split(cpi, td, tile_data, tp, mi_row,
+                                            mi_col, bsize, ptree, pc_tree,
+                                            ptree_luma, ctx_none))
+    return;
 
   if (partition == PARTITION_NONE) {
     xd->is_cfl_allowed_in_sdp =

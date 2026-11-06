@@ -21,9 +21,11 @@
 
 #include "av2/common/quant_common.h"
 
+#include "av2/encoder/context_tree.h"
 #include "av2/encoder/encodeframe.h"
 #include "av2/encoder/encodeframe_utils.h"
 #include "av2/encoder/mcomp.h"
+#include "av2/encoder/partition_search.h"
 #include "av2/encoder/var_based_part.h"
 #include "av2/encoder/reconinter_enc.h"
 #include "av2/encoder/rdopt_utils.h"
@@ -1507,4 +1509,1404 @@ void av2_choose_var_based_partitioning(AV2_COMP *cpi,
       }
     }
   }
+}
+
+/*
+ * Partition merge/split checks for av2_nonrd_use_partition()
+ * (rt_sf.nonrd_check_partition_merge_split).
+ *
+ * Variance-based partitioning picks the partition from source/prediction
+ * statistics only. During encoding, av2_nonrd_use_partition() calls
+ * av2_nonrd_check_partition_merge_split() on each partition tree node to refine
+ * that partition with rd checks:
+ * - try_split_partition(): a PARTITION_NONE block with a large prediction
+ *   residual is checked against its 4-way split. The PARTITION_NONE mode search
+ *   result is reused if the block is not split.
+ * - try_merge(): a leaf 4-way split is checked against PARTITION_NONE. The
+ *   sub-blocks are mode searched first (as the variance-based partition would
+ *   do anyway), and PARTITION_NONE is only searched if all of them are inter
+ *   skip blocks with the same reference frame.
+ * - try_merge_two_level(): a 64x64 4-way split whose sub-blocks are
+ *   PARTITION_NONE or leaf 4-way splits is checked against PARTITION_NONE.
+ */
+
+// Checks merging a 4-way split only if the prediction residual SAD (per luma
+// pixel, 8-bit scale, summed over all planes) is at most this.
+#define MERGE_MAX_AVG_SAD 32
+#define MERGE_MAX_AVG_SAD_SCREEN 8
+// Minimum sub-block source variance for doing a full PARTITION_NONE mode
+// search (instead of restricting to the sub-blocks' reference frame) when
+// checking merging on high-SAD superblocks.
+#define MERGE_FULL_SEARCH_MIN_SUB_VAR 500
+// Checks splitting a PARTITION_NONE block only if the prediction residual SAD
+// (per luma pixel, 8-bit scale, summed over all planes) is at least this.
+#define SPLIT_MIN_AVG_SAD 25
+#define SPLIT_MIN_AVG_SAD_SCREEN 50
+// Source variance range checked for splitting a PARTITION_NONE block.
+#define SPLIT_MIN_SOURCE_VAR 64
+#define SPLIT_MAX_SOURCE_VAR 5000
+// Smallest block size checked for splitting.
+#define SPLIT_MIN_BSIZE BLOCK_16X16
+
+// Returns true if the partition merge/split checks are allowed for the
+// current superblock.
+static bool allow_partition_merge_split_sb(const AV2_COMP *const cpi,
+                                           const MACROBLOCK *const x,
+                                           const PARTITION_TREE *ptree) {
+  if (cpi->sf.rt_sf.nonrd_check_partition_merge_split < 1 ||
+      cpi->sf.part_sf.partition_search_type != VAR_BASED_PARTITION ||
+      frame_is_intra_only(&cpi->common) || x->e_mbd.tree_type == CHROMA_PART ||
+      ptree == NULL) {
+    return false;
+  }
+  // Skip superblocks with zero source sad, or when the superblock root itself
+  // is unsplit (including early exit in av2_choose_var_based_partitioning()).
+  const PARTITION_TREE *const sb_root =
+      x->e_mbd.sbi ? x->e_mbd.sbi->ptree_root[0] : NULL;
+  if (x->source_sad_level == kZeroSad ||
+      (sb_root && sb_root->partition == PARTITION_NONE)) {
+    return false;
+  }
+  // For screen content, skip superblocks with detected scroll motion.
+  if (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN && x->sb_me_partition) {
+    return false;
+  }
+  return true;
+}
+
+// Gets the 4 sub-block nodes of a 4-way split partition tree in raster order.
+// Returns false if ptree is not a 4-way split. For bsize <= BLOCK_64X64 the
+// 4-way split is coded as a HORZ (VERT) partition followed by two VERT (HORZ)
+// partitions.
+static bool get_split_sub_trees(PARTITION_TREE *ptree,
+                                PARTITION_TREE *sub[SUB_PARTITIONS_SPLIT]) {
+  if (ptree->partition == PARTITION_SPLIT) {
+    for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+      if (!ptree->sub_tree[i]) return false;
+      sub[i] = ptree->sub_tree[i];
+    }
+    return true;
+  }
+  if (ptree->partition != PARTITION_HORZ && ptree->partition != PARTITION_VERT)
+    return false;
+  const bool horz = ptree->partition == PARTITION_HORZ;
+  const PARTITION_TYPE second_part = horz ? PARTITION_VERT : PARTITION_HORZ;
+  for (int i = 0; i < 2; ++i) {
+    PARTITION_TREE *const half = ptree->sub_tree[i];
+    if (!half || half->partition != second_part || !half->sub_tree[0] ||
+        !half->sub_tree[1]) {
+      return false;
+    }
+    for (int j = 0; j < 2; ++j) {
+      sub[horz ? i * 2 + j : j * 2 + i] = half->sub_tree[j];
+    }
+  }
+  return true;
+}
+
+// Returns true if ptree is a 4-way split of bsize into PARTITION_NONE leaves
+// and the block is fully inside the frame.
+static bool is_leaf_split_partition(const AV2_COMMON *const cm, int mi_row,
+                                    int mi_col, BLOCK_SIZE bsize,
+                                    PARTITION_TREE *ptree) {
+  if (!ptree || bsize <= BLOCK_8X8 ||
+      block_size_wide[bsize] != block_size_high[bsize]) {
+    return false;
+  }
+  if (mi_row + mi_size_high[bsize] > cm->mi_params.mi_rows ||
+      mi_col + mi_size_wide[bsize] > cm->mi_params.mi_cols) {
+    return false;
+  }
+  PARTITION_TREE *sub[SUB_PARTITIONS_SPLIT];
+  if (!get_split_sub_trees(ptree, sub)) return false;
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+    if (sub[i]->partition != PARTITION_NONE) return false;
+  }
+  return true;
+}
+
+// Returns true if ptree is a 4-way split of bsize whose sub-blocks are all
+// PARTITION_NONE or leaf 4-way splits, with at least one leaf 4-way split.
+static bool is_two_level_split_partition(
+    const AV2_COMMON *const cm, int mi_row, int mi_col, BLOCK_SIZE bsize,
+    PARTITION_TREE *ptree, PARTITION_TREE *sub[SUB_PARTITIONS_SPLIT]) {
+  if (!ptree || bsize < BLOCK_32X32 ||
+      block_size_wide[bsize] != block_size_high[bsize]) {
+    return false;
+  }
+  if (mi_row + mi_size_high[bsize] > cm->mi_params.mi_rows ||
+      mi_col + mi_size_wide[bsize] > cm->mi_params.mi_cols) {
+    return false;
+  }
+  if (!get_split_sub_trees(ptree, sub)) return false;
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const int hbw = mi_size_wide[bsize] / 2;
+  const int hbh = mi_size_high[bsize] / 2;
+  int num_leaf_split = 0;
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+    if (sub[i]->partition == PARTITION_NONE) continue;
+    if (!is_leaf_split_partition(cm, mi_row + (i >> 1) * hbh,
+                                 mi_col + (i & 1) * hbw, subsize, sub[i])) {
+      return false;
+    }
+    ++num_leaf_split;
+  }
+  return num_leaf_split > 0;
+}
+
+// Returns true if both PARTITION_NONE and the 4-way split can be signaled for
+// the block.
+static bool is_none_and_split_allowed(const AV2_COMMON *const cm,
+                                      const MACROBLOCKD *const xd,
+                                      REGION_TYPE parent_region_type,
+                                      int mi_row, int mi_col, BLOCK_SIZE bsize,
+                                      const CHROMA_REF_INFO *chroma_ref_info) {
+  bool partition_allowed[ALL_PARTITION_TYPES];
+  init_allowed_partitions_for_signaling(
+      partition_allowed, cm, xd->tree_type, parent_region_type, mi_row, mi_col,
+      xd->plane[1].subsampling_x, xd->plane[1].subsampling_y, bsize,
+      chroma_ref_info);
+  const bool can_split = is_square_split_eligible(bsize, cm->sb_size)
+                             ? partition_allowed[PARTITION_SPLIT]
+                             : (partition_allowed[PARTITION_HORZ] &&
+                                partition_allowed[PARTITION_VERT]);
+  return partition_allowed[PARTITION_NONE] && can_split;
+}
+
+static PICK_MODE_CONTEXT *get_or_init_pmc_none(
+    AV2_COMMON *const cm, ThreadData *td, MACROBLOCKD *const xd, int mi_row,
+    int mi_col, BLOCK_SIZE bsize, PC_TREE *pc_tree) {
+  const REGION_TYPE cur_region_type = pc_tree->region_type;
+  PICK_MODE_CONTEXT **ctx =
+      is_inter_sdp_chroma(cm, cur_region_type, xd->tree_type)
+          ? &pc_tree->none_chroma
+          : &pc_tree->none[cur_region_type];
+  if (*ctx == NULL) {
+    *ctx = av2_alloc_pmc(cm, xd->tree_type, mi_row, mi_col, bsize, pc_tree,
+                         PARTITION_NONE, 0, xd->plane[1].subsampling_x,
+                         xd->plane[1].subsampling_y, &td->shared_coeff_buf);
+  } else {
+    av2_reset_pmc(*ctx);
+    (*ctx)->chroma_ref_info = pc_tree->chroma_ref_info;
+    (*ctx)->mic.chroma_ref_info = pc_tree->chroma_ref_info;
+  }
+  return *ctx;
+}
+
+// Sets up the PC_TREE node and the PARTITION_NONE mode context of sub-block i
+// of the 4-way split of bsize, and returns the mode context.
+static PICK_MODE_CONTEXT *setup_split_sub_block(
+    AV2_COMMON *const cm, ThreadData *td, MACROBLOCKD *const xd, int mi_row,
+    int mi_col, BLOCK_SIZE bsize, int i, PC_TREE *pc_tree,
+    const PARTITION_TREE *ptree_luma, PC_TREE **child_tree) {
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const int ss_x = xd->plane[1].subsampling_x;
+  const int ss_y = xd->plane[1].subsampling_y;
+  const REGION_TYPE cur_region_type = pc_tree->region_type;
+  const int sub_mi_row = mi_row + (i >> 1) * (mi_size_high[bsize] / 2);
+  const int sub_mi_col = mi_col + (i & 1) * (mi_size_wide[bsize] / 2);
+  if (!pc_tree->split[cur_region_type][i]) {
+    pc_tree->split[cur_region_type][i] = av2_alloc_pc_tree_node(
+        xd->tree_type, sub_mi_row, sub_mi_col, cm->sb_size, subsize, pc_tree,
+        PARTITION_SPLIT, i, i == 3, ss_x, ss_y);
+  }
+  PC_TREE *const child = pc_tree->split[cur_region_type][i];
+  child->region_type = cur_region_type;
+  set_chroma_ref_info(xd->tree_type, sub_mi_row, sub_mi_col, i, subsize,
+                      &child->chroma_ref_info, &pc_tree->chroma_ref_info, bsize,
+                      PARTITION_SPLIT, ss_x, ss_y);
+  PICK_MODE_CONTEXT *const ctx =
+      get_or_init_pmc_none(cm, td, xd, sub_mi_row, sub_mi_col, subsize, child);
+  child->is_cfl_allowed_for_this_chroma =
+      pc_tree->is_cfl_allowed_for_this_chroma |
+      is_cfl_allowed_for_sdp(cm, xd, ptree_luma, PARTITION_SPLIT, bsize);
+  xd->is_cfl_allowed_in_sdp =
+      child->is_cfl_allowed_for_this_chroma |
+      is_cfl_allowed_for_sdp(cm, xd, get_partition_subtree_const(ptree_luma, i),
+                             PARTITION_NONE, subsize);
+  *child_tree = child;
+  return ctx;
+}
+
+// Replaces the partition tree of the block with a 4-way split into
+// PARTITION_NONE leaves.
+static void populate_split_ptree_nodes(AV2_COMMON *const cm,
+                                       const MACROBLOCKD *const xd, int mi_row,
+                                       int mi_col, BLOCK_SIZE bsize,
+                                       PARTITION_TREE *ptree,
+                                       const PC_TREE *pc_tree) {
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const int ss_x = xd->plane[1].subsampling_x;
+  const int ss_y = xd->plane[1].subsampling_y;
+  const int hbw = mi_size_wide[bsize] / 2;
+  const int hbh = mi_size_high[bsize] / 2;
+  const REGION_TYPE cur_region_type = pc_tree->region_type;
+
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; i++) {
+    if (ptree->sub_tree[i]) {
+      av2_free_ptree_recursive(ptree->sub_tree[i]);
+      ptree->sub_tree[i] = NULL;
+    }
+  }
+
+  if (is_square_split_eligible(bsize, cm->sb_size)) {
+    ptree->partition = PARTITION_SPLIT;
+    for (int i = 0; i < SUB_PARTITIONS_SPLIT; i++) {
+      const int x_idx = (i & 1) * hbw;
+      const int y_idx = (i >> 1) * hbh;
+      ptree->sub_tree[i] = av2_alloc_ptree_node(ptree, i);
+      ptree->sub_tree[i]->bsize = subsize;
+      ptree->sub_tree[i]->partition = PARTITION_NONE;
+      ptree->sub_tree[i]->mi_row = mi_row + y_idx;
+      ptree->sub_tree[i]->mi_col = mi_col + x_idx;
+      ptree->sub_tree[i]->region_type = cur_region_type;
+      ptree->sub_tree[i]->is_cfl_allowed_for_this_chroma_partition =
+          ptree->is_cfl_allowed_for_this_chroma_partition;
+      set_chroma_ref_info(xd->tree_type, mi_row + y_idx, mi_col + x_idx, i,
+                          subsize, &ptree->sub_tree[i]->chroma_ref_info,
+                          &pc_tree->chroma_ref_info, bsize, PARTITION_SPLIT,
+                          ss_x, ss_y);
+    }
+  } else {
+    // For bsize <= BLOCK_64X64, the 4-way split is a HORZ partition followed
+    // by two VERT partitions.
+    const BLOCK_SIZE rect_bsize = get_partition_subsize(bsize, PARTITION_HORZ);
+    ptree->partition = PARTITION_HORZ;
+    for (int r = 0; r < 2; r++) {
+      const int r_mi_row = mi_row + r * hbh;
+      ptree->sub_tree[r] = av2_alloc_ptree_node(ptree, r);
+      PARTITION_TREE *rect_node = ptree->sub_tree[r];
+      rect_node->bsize = rect_bsize;
+      rect_node->partition = PARTITION_VERT;
+      rect_node->mi_row = r_mi_row;
+      rect_node->mi_col = mi_col;
+      rect_node->region_type = cur_region_type;
+      rect_node->is_cfl_allowed_for_this_chroma_partition =
+          ptree->is_cfl_allowed_for_this_chroma_partition;
+      set_chroma_ref_info(xd->tree_type, r_mi_row, mi_col, r, rect_bsize,
+                          &rect_node->chroma_ref_info,
+                          &pc_tree->chroma_ref_info, bsize, PARTITION_HORZ,
+                          ss_x, ss_y);
+      for (int c = 0; c < 2; c++) {
+        const int c_mi_col = mi_col + c * hbw;
+        rect_node->sub_tree[c] = av2_alloc_ptree_node(rect_node, c);
+        PARTITION_TREE *leaf_node = rect_node->sub_tree[c];
+        leaf_node->bsize = subsize;
+        leaf_node->partition = PARTITION_NONE;
+        leaf_node->mi_row = r_mi_row;
+        leaf_node->mi_col = c_mi_col;
+        leaf_node->region_type = cur_region_type;
+        leaf_node->is_cfl_allowed_for_this_chroma_partition =
+            rect_node->is_cfl_allowed_for_this_chroma_partition;
+        set_chroma_ref_info(xd->tree_type, r_mi_row, c_mi_col, c, subsize,
+                            &leaf_node->chroma_ref_info,
+                            &rect_node->chroma_ref_info, rect_bsize,
+                            PARTITION_VERT, ss_x, ss_y);
+      }
+    }
+  }
+}
+
+// Returns the partition signaling cost of splitting bsize into 4 square
+// sub-blocks, and the PARTITION_NONE cost of each sub-block in sub_none_costs.
+static int get_four_way_split_partition_cost(
+    const AV2_COMMON *const cm, const MACROBLOCK *const x, int mi_row,
+    int mi_col, BLOCK_SIZE bsize, const PC_TREE *pc_tree,
+    const PARTITION_TREE *ptree_luma, const int *root_part_cost,
+    int *sub_none_costs) {
+  const MACROBLOCKD *const xd = &x->e_mbd;
+  const TREE_TYPE tree_type = xd->tree_type;
+  const REGION_TYPE cur_region_type = pc_tree->region_type;
+  const int ss_x = xd->plane[1].subsampling_x;
+  const int ss_y = xd->plane[1].subsampling_y;
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const int hbw = mi_size_wide[bsize] / 2;
+  const int hbh = mi_size_high[bsize] / 2;
+  int split_sig_cost = 0;
+
+  if (is_square_split_eligible(bsize, cm->sb_size)) {
+    split_sig_cost = root_part_cost[PARTITION_SPLIT];
+    for (int i = 0; i < SUB_PARTITIONS_SPLIT; i++) {
+      const int x_idx = (i & 1) * hbw;
+      const int y_idx = (i >> 1) * hbh;
+      CHROMA_REF_INFO child_cri;
+      set_chroma_ref_info(tree_type, mi_row + y_idx, mi_col + x_idx, i, subsize,
+                          &child_cri, &pc_tree->chroma_ref_info, bsize,
+                          PARTITION_SPLIT, ss_x, ss_y);
+      int child_part_cost[ALL_PARTITION_TYPES];
+      av2_nonrd_part_init_partition_costs(
+          cm, x, tree_type, cur_region_type, mi_row + y_idx, mi_col + x_idx,
+          ss_x, ss_y, subsize, get_partition_subtree_const(ptree_luma, i),
+          &child_cri, child_part_cost);
+      sub_none_costs[i] = child_part_cost[PARTITION_NONE];
+    }
+  } else {
+    split_sig_cost = root_part_cost[PARTITION_HORZ];
+    const BLOCK_SIZE rect_bsize = get_partition_subsize(bsize, PARTITION_HORZ);
+    for (int r = 0; r < 2; r++) {
+      const int r_mi_row = mi_row + r * hbh;
+      CHROMA_REF_INFO rect_cri;
+      set_chroma_ref_info(tree_type, r_mi_row, mi_col, r, rect_bsize, &rect_cri,
+                          &pc_tree->chroma_ref_info, bsize, PARTITION_HORZ,
+                          ss_x, ss_y);
+      const PARTITION_TREE *rect_ptree_luma =
+          get_partition_subtree_const(ptree_luma, r);
+      int rect_part_cost[ALL_PARTITION_TYPES];
+      av2_nonrd_part_init_partition_costs(
+          cm, x, tree_type, cur_region_type, r_mi_row, mi_col, ss_x, ss_y,
+          rect_bsize, rect_ptree_luma, &rect_cri, rect_part_cost);
+      split_sig_cost += rect_part_cost[PARTITION_VERT];
+      for (int c = 0; c < 2; c++) {
+        const int c_mi_col = mi_col + c * hbw;
+        CHROMA_REF_INFO leaf_cri;
+        set_chroma_ref_info(tree_type, r_mi_row, c_mi_col, c, subsize,
+                            &leaf_cri, &rect_cri, rect_bsize, PARTITION_VERT,
+                            ss_x, ss_y);
+        int leaf_part_cost[ALL_PARTITION_TYPES];
+        av2_nonrd_part_init_partition_costs(
+            cm, x, tree_type, cur_region_type, r_mi_row, c_mi_col, ss_x, ss_y,
+            subsize, get_partition_subtree_const(rect_ptree_luma, c), &leaf_cri,
+            leaf_part_cost);
+        sub_none_costs[r * 2 + c] = leaf_part_cost[PARTITION_NONE];
+      }
+    }
+  }
+  return split_sig_cost;
+}
+
+// Returns the SAD per luma pixel (8-bit scale, summed over all planes) between
+// the source and the variance partitioning reference at zero motion, or -1 if
+// that reference is not available.
+static int get_block_avg_sad(const AV2_COMP *const cpi, MACROBLOCK *const x,
+                             int mi_row, int mi_col, BLOCK_SIZE bsize,
+                             const CHROMA_REF_INFO *chroma_ref_info) {
+  const AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
+  const MV_REFERENCE_FRAME ref_frame =
+      (x->vbp_ref_frame != NONE_FRAME) ? x->vbp_ref_frame : 0;
+  const YV12_BUFFER_CONFIG *const yv12 = get_ref_frame_yv12_buf(cm, ref_frame);
+  if (yv12 == NULL) return -1;
+  const struct scale_factors *const sf =
+      get_ref_scale_factors_const(cm, ref_frame);
+  if (av2_is_scaled(sf)) return -1;
+  const int num_planes = av2_num_planes(cm);
+  av2_setup_src_planes(x, cpi->source, mi_row, mi_col, num_planes,
+                       chroma_ref_info);
+  av2_setup_pre_planes(xd, 0, yv12, mi_row, mi_col, sf, num_planes,
+                       chroma_ref_info);
+  uint64_t block_sad = 0;
+  for (int plane = 0; plane < num_planes; ++plane) {
+    const struct macroblock_plane *const p = &x->plane[plane];
+    const struct macroblockd_plane *const pd = &xd->plane[plane];
+    const BLOCK_SIZE bs =
+        get_plane_block_size(bsize, pd->subsampling_x, pd->subsampling_y);
+    if (bs == BLOCK_INVALID) continue;
+    block_sad += cpi->fn_ptr[bs].sdf(p->src.buf, p->src.stride, pd->pre[0].buf,
+                                     pd->pre[0].stride);
+  }
+  const int blk_pix = block_size_wide[bsize] * block_size_high[bsize];
+  return (int)((block_sad >> (xd->bd - 8)) / blk_pix);
+}
+
+// Records the picked reference frame of a block in x->picked_ref_frames_mask
+// for reference pruning in the remaining blocks of the superblock.
+static void update_picked_ref_mask(const AV2_COMP *const cpi,
+                                   MACROBLOCK *const x,
+                                   const PICK_MODE_CONTEXT *ctx,
+                                   BLOCK_SIZE bsize, int mi_row, int mi_col) {
+  if (cpi->sf.inter_sf.prune_ref_frames >= 3 &&
+      x->e_mbd.tree_type != CHROMA_PART) {
+    av2_update_picked_ref_frames_mask(x, av2_ref_frame_type(ctx->mic.ref_frame),
+                                      bsize, cpi->common.mib_size, mi_row,
+                                      mi_col);
+  }
+}
+
+// Encodes sub-block i of the 4-way split of bsize with the mode in ctx.
+static void encode_split_sub_block(AV2_COMP *const cpi, ThreadData *td,
+                                   TileDataEnc *tile_data, TokenExtra **tp,
+                                   MACROBLOCK *const x, int mi_row, int mi_col,
+                                   BLOCK_SIZE bsize, int i,
+                                   const PICK_MODE_CONTEXT *ctx,
+                                   RUN_TYPE dry_run) {
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const int sub_mi_row = mi_row + (i >> 1) * (mi_size_high[bsize] / 2);
+  const int sub_mi_col = mi_col + (i & 1) * (mi_size_wide[bsize] / 2);
+  av2_nonrd_part_encode_b(cpi, tile_data, td, tp, sub_mi_row, sub_mi_col,
+                          dry_run, subsize, ctx);
+  if (dry_run == OUTPUT_ENABLED) {
+    update_picked_ref_mask(cpi, x, ctx, subsize, sub_mi_row, sub_mi_col);
+  }
+}
+
+// Encodes the 4 sub-blocks of bsize with the modes stored in their PC_TREE
+// nodes.
+static void encode_four_way_split(AV2_COMP *const cpi, ThreadData *td,
+                                  TileDataEnc *tile_data, TokenExtra **tp,
+                                  MACROBLOCK *const x, int mi_row, int mi_col,
+                                  BLOCK_SIZE bsize, const PARTITION_TREE *ptree,
+                                  PC_TREE *pc_tree,
+                                  const PARTITION_TREE *ptree_luma) {
+  AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const REGION_TYPE cur_region_type = pc_tree->region_type;
+  pc_tree->partitioning = ptree->partition;
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+    const PC_TREE *const child = pc_tree->split[cur_region_type][i];
+    const PICK_MODE_CONTEXT *const ctx =
+        is_inter_sdp_chroma(cm, cur_region_type, xd->tree_type)
+            ? child->none_chroma
+            : child->none[cur_region_type];
+    xd->is_cfl_allowed_in_sdp =
+        child->is_cfl_allowed_for_this_chroma |
+        is_cfl_allowed_for_sdp(cm, xd,
+                               get_partition_subtree_const(ptree_luma, i),
+                               PARTITION_NONE, subsize);
+    encode_split_sub_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize, i,
+                           ctx, OUTPUT_ENABLED);
+  }
+}
+
+// Encodes bsize as PARTITION_NONE with the mode in ctx_none, and updates the
+// partition tree accordingly.
+static void encode_merged_block(AV2_COMP *const cpi, ThreadData *td,
+                                TileDataEnc *tile_data, TokenExtra **tp,
+                                MACROBLOCK *const x, int mi_row, int mi_col,
+                                BLOCK_SIZE bsize, PARTITION_TREE *ptree,
+                                PC_TREE *pc_tree,
+                                const PARTITION_TREE *ptree_luma,
+                                const PICK_MODE_CONTEXT *ctx_none) {
+  AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
+  pc_tree->partitioning = PARTITION_NONE;
+  ptree->partition = PARTITION_NONE;
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; i++) {
+    if (ptree->sub_tree[i]) {
+      av2_free_ptree_recursive(ptree->sub_tree[i]);
+      ptree->sub_tree[i] = NULL;
+    }
+  }
+  xd->is_cfl_allowed_in_sdp =
+      pc_tree->is_cfl_allowed_for_this_chroma |
+      ptree->is_cfl_allowed_for_this_chroma_partition |
+      is_cfl_allowed_for_sdp(cm, xd, ptree_luma, PARTITION_NONE, bsize);
+  av2_nonrd_part_encode_b(cpi, tile_data, td, tp, mi_row, mi_col,
+                          OUTPUT_ENABLED, bsize, ctx_none);
+  update_picked_ref_mask(cpi, x, ctx_none, bsize, mi_row, mi_col);
+}
+
+// Checks splitting a PARTITION_NONE block with a large prediction residual
+// into 4 sub-blocks. Returns true if the block was split and encoded.
+// Otherwise the PARTITION_NONE mode search result may be kept in ctx_none
+// (rd_mode_is_ready) for reuse by the caller.
+static bool try_split_partition(AV2_COMP *const cpi, ThreadData *td,
+                                TileDataEnc *tile_data, TokenExtra **tp,
+                                MACROBLOCK *const x, int mi_row, int mi_col,
+                                BLOCK_SIZE bsize, PARTITION_TREE *ptree,
+                                PC_TREE *pc_tree,
+                                const PARTITION_TREE *ptree_luma,
+                                PICK_MODE_CONTEXT *ctx_none) {
+  AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
+  if (bsize < SPLIT_MIN_BSIZE || bsize > BLOCK_64X64 ||
+      block_size_wide[bsize] != block_size_high[bsize]) {
+    return false;
+  }
+  // Only check blocks that are fully inside the frame.
+  if (mi_row + mi_size_high[bsize] > cm->mi_params.mi_rows ||
+      mi_col + mi_size_wide[bsize] > cm->mi_params.mi_cols) {
+    return false;
+  }
+  // Skip superblocks with low source sad.
+  if (x->source_sad_level <= kLowSad) return false;
+  const REGION_TYPE parent_region_type =
+      pc_tree->parent ? pc_tree->parent->region_type : INTRA_REGION;
+  if (!is_none_and_split_allowed(cm, xd, parent_region_type, mi_row, mi_col,
+                                 bsize, &pc_tree->chroma_ref_info)) {
+    return false;
+  }
+  // Skip blocks with a small prediction residual.
+  const int min_split_sad = (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN)
+                                ? SPLIT_MIN_AVG_SAD_SCREEN
+                                : SPLIT_MIN_AVG_SAD;
+  if (get_block_avg_sad(cpi, x, mi_row, mi_col, bsize,
+                        &pc_tree->chroma_ref_info) < min_split_sad) {
+    return false;
+  }
+
+  const int orig_rdmult = x->rdmult;
+  setup_block_rdmult(cpi, x, mi_row, mi_col, bsize, NO_AQ, NULL);
+  const int num_planes = av2_num_planes(cm);
+  RD_SEARCH_MACROBLOCK_CONTEXT x_ctx;
+  av2_save_context(x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+  const REF_MV_BANK orig_ref_mv_bank = xd->ref_mv_bank;
+  const WARP_PARAM_BANK orig_warp_param_bank = xd->warp_param_bank;
+  int thr_none_saved[MB_MODE_COUNT];
+  memcpy(thr_none_saved, x->thresh_freq_fact[bsize], sizeof(thr_none_saved));
+
+  // Mode search for PARTITION_NONE.
+  xd->is_cfl_allowed_in_sdp =
+      pc_tree->is_cfl_allowed_for_this_chroma |
+      ptree->is_cfl_allowed_for_this_chroma_partition |
+      is_cfl_allowed_for_sdp(cm, xd, ptree_luma, PARTITION_NONE, bsize);
+  RD_STATS none_rdc;
+  av2_invalid_rd_stats(&none_rdc);
+  av2_nonrd_part_pick_sb_modes(cpi, td, tile_data, x, mi_row, mi_col, &none_rdc,
+                               pc_tree, bsize, ctx_none, INT64_MAX);
+  xd->ref_mv_bank = orig_ref_mv_bank;
+  xd->warp_param_bank = orig_warp_param_bank;
+  av2_restore_context(cm, x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+  if (none_rdc.rate == INT_MAX || none_rdc.rdcost == INT64_MAX) {
+    x->rdmult = orig_rdmult;
+    return false;
+  }
+  // Keep the PARTITION_NONE result so it is not searched again if the block
+  // is not split.
+  ctx_none->rd_mode_is_ready = 1;
+
+  // Skip the split check if PARTITION_NONE is skip, has a low distortion, or
+  // has a very low or very high source variance.
+  const int blk_pix = block_size_wide[bsize] * block_size_high[bsize];
+  if (ctx_none->rd_stats.skip_txfm || ctx_none->mic.skip_mode ||
+      none_rdc.dist < ((int64_t)blk_pix << 9) ||
+      x->source_variance <= SPLIT_MIN_SOURCE_VAR ||
+      x->source_variance > SPLIT_MAX_SOURCE_VAR) {
+    x->rdmult = orig_rdmult;
+    return false;
+  }
+  int partition_cost[ALL_PARTITION_TYPES];
+  av2_nonrd_part_init_partition_costs(
+      cm, x, xd->tree_type, parent_region_type, mi_row, mi_col,
+      xd->plane[1].subsampling_x, xd->plane[1].subsampling_y, bsize, ptree_luma,
+      &pc_tree->chroma_ref_info, partition_cost);
+  none_rdc.rate += partition_cost[PARTITION_NONE];
+  none_rdc.rdcost = RDCOST(x->rdmult, none_rdc.rate, none_rdc.dist);
+
+  // Evaluate the split: the sub-blocks are mode searched in raster order, each
+  // bounded by the remaining rd budget, and all but the last one are encoded in
+  // dry-run mode so the next sub-block sees the right reconstruction.
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const int hbw = mi_size_wide[bsize] / 2;
+  const int hbh = mi_size_high[bsize] / 2;
+  int thr_sub_saved[MB_MODE_COUNT];
+  memcpy(thr_sub_saved, x->thresh_freq_fact[subsize], sizeof(thr_sub_saved));
+  int sub_none_costs[SUB_PARTITIONS_SPLIT] = { 0 };
+  const int split_sig_cost = get_four_way_split_partition_cost(
+      cm, x, mi_row, mi_col, bsize, pc_tree, ptree_luma, partition_cost,
+      sub_none_costs);
+  int64_t split_rdcost = RDCOST(x->rdmult, split_sig_cost, 0);
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT && split_rdcost < none_rdc.rdcost;
+       ++i) {
+    PC_TREE *child = NULL;
+    PICK_MODE_CONTEXT *const ctx = setup_split_sub_block(
+        cm, td, xd, mi_row, mi_col, bsize, i, pc_tree, ptree_luma, &child);
+    const int64_t remaining_rdcost = none_rdc.rdcost - split_rdcost -
+                                     RDCOST(x->rdmult, sub_none_costs[i], 0);
+    if (remaining_rdcost <= 0) {
+      split_rdcost = INT64_MAX;
+      break;
+    }
+    RD_STATS this_rdc;
+    av2_invalid_rd_stats(&this_rdc);
+    av2_nonrd_part_pick_sb_modes(cpi, td, tile_data, x, mi_row + (i >> 1) * hbh,
+                                 mi_col + (i & 1) * hbw, &this_rdc, child,
+                                 subsize, ctx, remaining_rdcost);
+    if (this_rdc.rate == INT_MAX || this_rdc.rdcost == INT64_MAX) {
+      split_rdcost = INT64_MAX;
+      break;
+    }
+    split_rdcost +=
+        RDCOST(x->rdmult, this_rdc.rate + sub_none_costs[i], this_rdc.dist);
+    if (i != SUB_PARTITIONS_SPLIT - 1 && split_rdcost < none_rdc.rdcost) {
+      encode_split_sub_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize,
+                             i, ctx, DRY_RUN_NORMAL);
+    }
+  }
+  const REF_MV_BANK split_ref_mv_bank = xd->ref_mv_bank;
+  const WARP_PARAM_BANK split_warp_param_bank = xd->warp_param_bank;
+  xd->ref_mv_bank = orig_ref_mv_bank;
+  xd->warp_param_bank = orig_warp_param_bank;
+  av2_restore_context(cm, x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+  if (split_rdcost >= none_rdc.rdcost) {
+    memcpy(x->thresh_freq_fact[subsize], thr_sub_saved, sizeof(thr_sub_saved));
+    x->rdmult = orig_rdmult;
+    return false;
+  }
+
+  memcpy(x->thresh_freq_fact[bsize], thr_none_saved, sizeof(thr_none_saved));
+  ctx_none->rd_mode_is_ready = 0;
+  xd->ref_mv_bank = split_ref_mv_bank;
+  xd->warp_param_bank = split_warp_param_bank;
+  populate_split_ptree_nodes(cm, xd, mi_row, mi_col, bsize, ptree, pc_tree);
+  encode_four_way_split(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize, ptree,
+                        pc_tree, ptree_luma);
+  x->rdmult = orig_rdmult;
+  return true;
+}
+
+// Returns true if the mode in ctx is an inter skip block with a single
+// reference frame equal to *ref_frame (set from the first candidate).
+static bool is_merge_candidate(const PICK_MODE_CONTEXT *ctx,
+                               const RD_STATS *rdc, TREE_TYPE tree_type,
+                               MV_REFERENCE_FRAME *ref_frame, bool *ref_set) {
+  const MB_MODE_INFO *const mi = &ctx->mic;
+  if (rdc->rate == INT_MAX || rdc->rdcost == INT64_MAX) return false;
+  if (!ctx->rd_stats.skip_txfm && !mi->skip_mode) return false;
+  if (!is_inter_block(mi, tree_type) || has_second_ref(mi)) return false;
+  if (!*ref_set) {
+    *ref_frame = mi->ref_frame[0];
+    *ref_set = true;
+  }
+  return mi->ref_frame[0] == *ref_frame;
+}
+
+// Mode searches PARTITION_NONE for a merge check. For bsize < BLOCK_64X64 on
+// non-screen content, restricts the search to the sub-blocks' reference frame
+// via x->inter_mode_cache unless the sub-blocks have high source variance on a
+// high-SAD superblock.
+static void pick_merged_none_modes(
+    AV2_COMP *const cpi, ThreadData *td, TileDataEnc *tile_data,
+    MACROBLOCK *const x, int mi_row, int mi_col, RD_STATS *none_rdc,
+    PC_TREE *pc_tree, BLOCK_SIZE bsize, PICK_MODE_CONTEXT *ctx_none,
+    int64_t none_bound, MV_REFERENCE_FRAME ref_frame, unsigned int max_sub_var,
+    bool is_two_level_sub) {
+  bool use_ref_only = bsize < BLOCK_64X64 &&
+                      cpi->oxcf.tune_cfg.content != AVM_CONTENT_SCREEN &&
+                      is_inter_ref_frame(ref_frame);
+  if (use_ref_only && !is_two_level_sub &&
+      max_sub_var > MERGE_FULL_SEARCH_MIN_SUB_VAR &&
+      x->source_sad_level >= kHighSad) {
+    use_ref_only = false;
+  }
+  if (!use_ref_only) {
+    av2_nonrd_part_pick_sb_modes(cpi, td, tile_data, x, mi_row, mi_col,
+                                 none_rdc, pc_tree, bsize, ctx_none,
+                                 none_bound);
+    return;
+  }
+  MB_MODE_INFO cache_mi;
+  av2_zero(cache_mi);
+  cache_mi.mode = MB_MODE_COUNT;
+  cache_mi.ref_frame[0] = ref_frame;
+  cache_mi.ref_frame[1] = NONE_FRAME;
+  const uint16_t orig_reuse_type = x->reuse_inter_mode_cache_type;
+  MB_MODE_INFO *orig_cache[NUMBER_OF_CACHED_MODES];
+  for (int k = 0; k < NUMBER_OF_CACHED_MODES; ++k) {
+    orig_cache[k] = x->inter_mode_cache[k];
+    x->inter_mode_cache[k] = (k == 0) ? &cache_mi : NULL;
+  }
+  x->reuse_inter_mode_cache_type = REUSE_INTER_MODE_IN_INTERFRAME_FLAG;
+  av2_nonrd_part_pick_sb_modes(cpi, td, tile_data, x, mi_row, mi_col, none_rdc,
+                               pc_tree, bsize, ctx_none, none_bound);
+  x->reuse_inter_mode_cache_type = orig_reuse_type;
+  for (int k = 0; k < NUMBER_OF_CACHED_MODES; ++k) {
+    x->inter_mode_cache[k] = orig_cache[k];
+  }
+}
+
+// Checks merging a leaf 4-way split into PARTITION_NONE. The sub-blocks are
+// mode searched first. If they are all inter skip blocks with the same single
+// reference frame, PARTITION_NONE is searched with the split rd cost as the
+// bound, and picked if it has a lower rd cost without increasing the
+// distortion by more than 1/8. Returns true if the block was encoded (merged
+// or split).
+static bool try_merge(AV2_COMP *const cpi, ThreadData *td,
+                      TileDataEnc *tile_data, TokenExtra **tp,
+                      MACROBLOCK *const x, int mi_row, int mi_col,
+                      BLOCK_SIZE bsize, PARTITION_TREE *ptree, PC_TREE *pc_tree,
+                      const PARTITION_TREE *ptree_luma,
+                      PICK_MODE_CONTEXT *ctx_none) {
+  AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
+  if (bsize < BLOCK_16X16 || bsize > BLOCK_64X64) return false;
+  // Only merge into 64x64 at higher quantizers.
+  if (bsize > BLOCK_32X32 && cm->quant_params.base_qindex <= 100) return false;
+  const REGION_TYPE parent_region_type =
+      pc_tree->parent ? pc_tree->parent->region_type : INTRA_REGION;
+  if (!is_none_and_split_allowed(cm, xd, parent_region_type, mi_row, mi_col,
+                                 bsize, &pc_tree->chroma_ref_info)) {
+    return false;
+  }
+  // Only check merging when the prediction residual is small.
+  const int max_merge_sad = (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN)
+                                ? MERGE_MAX_AVG_SAD_SCREEN
+                                : MERGE_MAX_AVG_SAD;
+  const int block_avg_sad = get_block_avg_sad(cpi, x, mi_row, mi_col, bsize,
+                                              &pc_tree->chroma_ref_info);
+  if (block_avg_sad < 0 || block_avg_sad > max_merge_sad) return false;
+
+  const int orig_rdmult = x->rdmult;
+  setup_block_rdmult(cpi, x, mi_row, mi_col, bsize, NO_AQ, NULL);
+  const int num_planes = av2_num_planes(cm);
+  RD_SEARCH_MACROBLOCK_CONTEXT x_ctx;
+  av2_save_context(x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+  const REF_MV_BANK orig_ref_mv_bank = xd->ref_mv_bank;
+  const WARP_PARAM_BANK orig_warp_param_bank = xd->warp_param_bank;
+
+  // Mode search for the sub-blocks, in raster order. While they are merge
+  // candidates they are encoded in dry-run mode; once a sub-block is not, the
+  // ones searched so far are encoded for real and the rest follow the split.
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const int hbw = mi_size_wide[bsize] / 2;
+  const int hbh = mi_size_high[bsize] / 2;
+  int thr_sub_saved[MB_MODE_COUNT];
+  memcpy(thr_sub_saved, x->thresh_freq_fact[subsize], sizeof(thr_sub_saved));
+  int64_t split_dist = 0;
+  bool candidate = true;
+  MV_REFERENCE_FRAME ref_frame = NONE_FRAME;
+  bool ref_set = false;
+  unsigned int max_sub_var = 0;
+  PICK_MODE_CONTEXT *sub_ctx[SUB_PARTITIONS_SPLIT];
+  RD_STATS sub_rdc[SUB_PARTITIONS_SPLIT];
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+    const int sub_mi_row = mi_row + (i >> 1) * hbh;
+    const int sub_mi_col = mi_col + (i & 1) * hbw;
+    PC_TREE *child = NULL;
+    sub_ctx[i] = setup_split_sub_block(cm, td, xd, mi_row, mi_col, bsize, i,
+                                       pc_tree, ptree_luma, &child);
+    av2_invalid_rd_stats(&sub_rdc[i]);
+    av2_nonrd_part_pick_sb_modes(cpi, td, tile_data, x, sub_mi_row, sub_mi_col,
+                                 &sub_rdc[i], child, subsize, sub_ctx[i],
+                                 INT64_MAX);
+    if (candidate) {
+      if (x->source_variance > max_sub_var) max_sub_var = x->source_variance;
+      candidate = is_merge_candidate(sub_ctx[i], &sub_rdc[i], xd->tree_type,
+                                     &ref_frame, &ref_set);
+      if (candidate) {
+        split_dist += sub_rdc[i].dist;
+        update_picked_ref_mask(cpi, x, sub_ctx[i], subsize, sub_mi_row,
+                               sub_mi_col);
+        if (i != SUB_PARTITIONS_SPLIT - 1) {
+          encode_split_sub_block(cpi, td, tile_data, tp, x, mi_row, mi_col,
+                                 bsize, i, sub_ctx[i], DRY_RUN_NORMAL);
+        }
+        continue;
+      }
+      // Not a merge candidate: encode the previous sub-blocks for real.
+      if (i > 0) {
+        av2_restore_context(cm, x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+      }
+      for (int k = 0; k < i; ++k) {
+        encode_split_sub_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize,
+                               k, sub_ctx[k], OUTPUT_ENABLED);
+      }
+    }
+    encode_split_sub_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize, i,
+                           sub_ctx[i], OUTPUT_ENABLED);
+  }
+  if (!candidate) {
+    pc_tree->partitioning = ptree->partition;
+    x->rdmult = orig_rdmult;
+    return true;
+  }
+
+  // All sub-blocks are inter skip blocks: check PARTITION_NONE.
+  const REF_MV_BANK split_ref_mv_bank = xd->ref_mv_bank;
+  const WARP_PARAM_BANK split_warp_param_bank = xd->warp_param_bank;
+  xd->ref_mv_bank = orig_ref_mv_bank;
+  xd->warp_param_bank = orig_warp_param_bank;
+  av2_restore_context(cm, x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+  int partition_cost[ALL_PARTITION_TYPES];
+  av2_nonrd_part_init_partition_costs(
+      cm, x, xd->tree_type, parent_region_type, mi_row, mi_col,
+      xd->plane[1].subsampling_x, xd->plane[1].subsampling_y, bsize, ptree_luma,
+      &pc_tree->chroma_ref_info, partition_cost);
+  int sub_none_costs[SUB_PARTITIONS_SPLIT] = { 0 };
+  const int split_sig_cost = get_four_way_split_partition_cost(
+      cm, x, mi_row, mi_col, bsize, pc_tree, ptree_luma, partition_cost,
+      sub_none_costs);
+  int64_t split_rdcost = RDCOST(x->rdmult, split_sig_cost, 0);
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+    split_rdcost +=
+        RDCOST(x->rdmult, sub_rdc[i].rate + sub_none_costs[i], sub_rdc[i].dist);
+  }
+  bool merge = false;
+  bool none_searched = false;
+  int thr_none_saved[MB_MODE_COUNT];
+  const int64_t none_bound =
+      split_rdcost - RDCOST(x->rdmult, partition_cost[PARTITION_NONE], 0);
+  if (none_bound > 0) {
+    xd->is_cfl_allowed_in_sdp =
+        pc_tree->is_cfl_allowed_for_this_chroma |
+        ptree->is_cfl_allowed_for_this_chroma_partition |
+        is_cfl_allowed_for_sdp(cm, xd, ptree_luma, PARTITION_NONE, bsize);
+    memcpy(thr_none_saved, x->thresh_freq_fact[bsize], sizeof(thr_none_saved));
+    none_searched = true;
+    RD_STATS none_rdc;
+    av2_invalid_rd_stats(&none_rdc);
+    pick_merged_none_modes(cpi, td, tile_data, x, mi_row, mi_col, &none_rdc,
+                           pc_tree, bsize, ctx_none, none_bound, ref_frame,
+                           max_sub_var, /*is_two_level_sub=*/false);
+    // Do not merge if the distortion increases by more than 1/8: on static
+    // content the extra distortion persists in the following frames.
+    merge = none_rdc.rate != INT_MAX && none_rdc.rdcost != INT64_MAX &&
+            RDCOST(x->rdmult, none_rdc.rate + partition_cost[PARTITION_NONE],
+                   none_rdc.dist) < split_rdcost &&
+            none_rdc.dist <= split_dist + (split_dist >> 3);
+  }
+  if (merge) {
+    memcpy(x->thresh_freq_fact[subsize], thr_sub_saved, sizeof(thr_sub_saved));
+    encode_merged_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize, ptree,
+                        pc_tree, ptree_luma, ctx_none);
+  } else {
+    if (none_searched) {
+      memcpy(x->thresh_freq_fact[bsize], thr_none_saved,
+             sizeof(thr_none_saved));
+    }
+    xd->ref_mv_bank = split_ref_mv_bank;
+    xd->warp_param_bank = split_warp_param_bank;
+    encode_four_way_split(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize,
+                          ptree, pc_tree, ptree_luma);
+  }
+  x->rdmult = orig_rdmult;
+  return true;
+}
+
+typedef struct {
+  bool merged;     // A leaf 4-way split sub-block was merged.
+  int64_t rdcost;  // Including the partition signaling cost.
+  int64_t dist;
+} SubBlockEval;
+
+enum { SUB_EVAL_FAIL = 0, SUB_EVAL_DONE, SUB_EVAL_CANDIDATE };
+
+// Evaluates a leaf 4-way split sub-block of the two-level merge in dry-run
+// mode. Returns SUB_EVAL_FAIL if one of its sub-blocks is not a merge
+// candidate. Otherwise merging the sub-block is checked as in try_merge(), the
+// chosen partition is encoded in dry-run mode if encode_result, and
+// SUB_EVAL_CANDIDATE is returned if all the resulting blocks are still merge
+// candidates (SUB_EVAL_DONE otherwise).
+static int eval_leaf_split_sub_block(
+    AV2_COMP *const cpi, ThreadData *td, TileDataEnc *tile_data,
+    TokenExtra **tp, MACROBLOCK *const x, int mi_row, int mi_col,
+    BLOCK_SIZE bsize, const PARTITION_TREE *ptree, PC_TREE *pc_tree,
+    const PARTITION_TREE *ptree_luma, PICK_MODE_CONTEXT *ctx_none,
+    MV_REFERENCE_FRAME *ref_frame, bool *ref_set, bool encode_result,
+    SubBlockEval *eval, int *num_searched) {
+  AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
+  *num_searched = 0;
+  const REGION_TYPE parent_region_type =
+      pc_tree->parent ? pc_tree->parent->region_type : INTRA_REGION;
+  if (!is_none_and_split_allowed(cm, xd, parent_region_type, mi_row, mi_col,
+                                 bsize, &pc_tree->chroma_ref_info)) {
+    return SUB_EVAL_FAIL;
+  }
+  const int num_planes = av2_num_planes(cm);
+  RD_SEARCH_MACROBLOCK_CONTEXT x_ctx;
+  av2_save_context(x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+  const REF_MV_BANK orig_ref_mv_bank = xd->ref_mv_bank;
+  const WARP_PARAM_BANK orig_warp_param_bank = xd->warp_param_bank;
+
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const int hbw = mi_size_wide[bsize] / 2;
+  const int hbh = mi_size_high[bsize] / 2;
+  int thr_sub_saved[MB_MODE_COUNT];
+  memcpy(thr_sub_saved, x->thresh_freq_fact[subsize], sizeof(thr_sub_saved));
+  int64_t split_dist = 0;
+  unsigned int max_sub_var = 0;
+  PICK_MODE_CONTEXT *sub_ctx[SUB_PARTITIONS_SPLIT];
+  RD_STATS sub_rdc[SUB_PARTITIONS_SPLIT];
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+    const int sub_mi_row = mi_row + (i >> 1) * hbh;
+    const int sub_mi_col = mi_col + (i & 1) * hbw;
+    PC_TREE *child = NULL;
+    sub_ctx[i] = setup_split_sub_block(cm, td, xd, mi_row, mi_col, bsize, i,
+                                       pc_tree, ptree_luma, &child);
+    av2_invalid_rd_stats(&sub_rdc[i]);
+    av2_nonrd_part_pick_sb_modes(cpi, td, tile_data, x, sub_mi_row, sub_mi_col,
+                                 &sub_rdc[i], child, subsize, sub_ctx[i],
+                                 INT64_MAX);
+    if (x->source_variance > max_sub_var) max_sub_var = x->source_variance;
+    if (!is_merge_candidate(sub_ctx[i], &sub_rdc[i], xd->tree_type, ref_frame,
+                            ref_set)) {
+      *num_searched =
+          (sub_rdc[i].rate != INT_MAX && sub_rdc[i].rdcost != INT64_MAX) ? i + 1
+                                                                         : i;
+      return SUB_EVAL_FAIL;
+    }
+    split_dist += sub_rdc[i].dist;
+    update_picked_ref_mask(cpi, x, sub_ctx[i], subsize, sub_mi_row, sub_mi_col);
+    if (i != SUB_PARTITIONS_SPLIT - 1) {
+      encode_split_sub_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize,
+                             i, sub_ctx[i], DRY_RUN_NORMAL);
+    }
+  }
+  const REF_MV_BANK split_ref_mv_bank = xd->ref_mv_bank;
+  const WARP_PARAM_BANK split_warp_param_bank = xd->warp_param_bank;
+  xd->ref_mv_bank = orig_ref_mv_bank;
+  xd->warp_param_bank = orig_warp_param_bank;
+  av2_restore_context(cm, x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+  int partition_cost[ALL_PARTITION_TYPES];
+  av2_nonrd_part_init_partition_costs(
+      cm, x, xd->tree_type, parent_region_type, mi_row, mi_col,
+      xd->plane[1].subsampling_x, xd->plane[1].subsampling_y, bsize, ptree_luma,
+      &pc_tree->chroma_ref_info, partition_cost);
+  int sub_none_costs[SUB_PARTITIONS_SPLIT] = { 0 };
+  const int split_sig_cost = get_four_way_split_partition_cost(
+      cm, x, mi_row, mi_col, bsize, pc_tree, ptree_luma, partition_cost,
+      sub_none_costs);
+  int64_t split_rdcost = RDCOST(x->rdmult, split_sig_cost, 0);
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+    split_rdcost +=
+        RDCOST(x->rdmult, sub_rdc[i].rate + sub_none_costs[i], sub_rdc[i].dist);
+  }
+
+  bool merge = false;
+  bool none_searched = false;
+  int thr_none_saved[MB_MODE_COUNT];
+  RD_STATS none_rdc;
+  av2_invalid_rd_stats(&none_rdc);
+  const int64_t none_bound =
+      split_rdcost - RDCOST(x->rdmult, partition_cost[PARTITION_NONE], 0);
+  if (none_bound > 0) {
+    xd->is_cfl_allowed_in_sdp =
+        pc_tree->is_cfl_allowed_for_this_chroma |
+        ptree->is_cfl_allowed_for_this_chroma_partition |
+        is_cfl_allowed_for_sdp(cm, xd, ptree_luma, PARTITION_NONE, bsize);
+    memcpy(thr_none_saved, x->thresh_freq_fact[bsize], sizeof(thr_none_saved));
+    none_searched = true;
+    pick_merged_none_modes(cpi, td, tile_data, x, mi_row, mi_col, &none_rdc,
+                           pc_tree, bsize, ctx_none, none_bound, *ref_frame,
+                           max_sub_var, /*is_two_level_sub=*/true);
+    merge = none_rdc.rate != INT_MAX && none_rdc.rdcost != INT64_MAX &&
+            RDCOST(x->rdmult, none_rdc.rate + partition_cost[PARTITION_NONE],
+                   none_rdc.dist) < split_rdcost &&
+            none_rdc.dist <= split_dist + (split_dist >> 3);
+  }
+  int status = SUB_EVAL_CANDIDATE;
+  if (merge) {
+    memcpy(x->thresh_freq_fact[subsize], thr_sub_saved, sizeof(thr_sub_saved));
+    eval->merged = true;
+    eval->rdcost =
+        RDCOST(x->rdmult, none_rdc.rate + partition_cost[PARTITION_NONE],
+               none_rdc.dist);
+    eval->dist = none_rdc.dist;
+    if (!is_merge_candidate(ctx_none, &none_rdc, xd->tree_type, ref_frame,
+                            ref_set)) {
+      status = SUB_EVAL_DONE;
+    }
+    update_picked_ref_mask(cpi, x, ctx_none, bsize, mi_row, mi_col);
+    if (encode_result && status == SUB_EVAL_CANDIDATE) {
+      xd->is_cfl_allowed_in_sdp =
+          pc_tree->is_cfl_allowed_for_this_chroma |
+          ptree->is_cfl_allowed_for_this_chroma_partition |
+          is_cfl_allowed_for_sdp(cm, xd, ptree_luma, PARTITION_NONE, bsize);
+      av2_nonrd_part_encode_b(cpi, tile_data, td, tp, mi_row, mi_col,
+                              DRY_RUN_NORMAL, bsize, ctx_none);
+    }
+  } else {
+    if (none_searched) {
+      memcpy(x->thresh_freq_fact[bsize], thr_none_saved,
+             sizeof(thr_none_saved));
+    }
+    eval->merged = false;
+    eval->rdcost = split_rdcost;
+    eval->dist = split_dist;
+    xd->ref_mv_bank = split_ref_mv_bank;
+    xd->warp_param_bank = split_warp_param_bank;
+    if (encode_result) {
+      av2_restore_context(cm, x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+      for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+        const PC_TREE *const child = pc_tree->split[pc_tree->region_type][i];
+        xd->is_cfl_allowed_in_sdp =
+            child->is_cfl_allowed_for_this_chroma |
+            is_cfl_allowed_for_sdp(cm, xd,
+                                   get_partition_subtree_const(ptree_luma, i),
+                                   PARTITION_NONE, subsize);
+        encode_split_sub_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize,
+                               i, sub_ctx[i], DRY_RUN_NORMAL);
+      }
+    }
+  }
+  return status;
+}
+
+// Encodes a PARTITION_NONE block the default way (split check, mode search,
+// and encoding).
+static void encode_none_block_default(AV2_COMP *const cpi, ThreadData *td,
+                                      TileDataEnc *tile_data, TokenExtra **tp,
+                                      MACROBLOCK *const x, int mi_row,
+                                      int mi_col, BLOCK_SIZE bsize,
+                                      PARTITION_TREE *ptree, PC_TREE *pc_tree,
+                                      const PARTITION_TREE *ptree_luma,
+                                      PICK_MODE_CONTEXT *ctx) {
+  AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
+  if (try_split_partition(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize,
+                          ptree, pc_tree, ptree_luma, ctx)) {
+    return;
+  }
+  xd->is_cfl_allowed_in_sdp =
+      pc_tree->is_cfl_allowed_for_this_chroma |
+      ptree->is_cfl_allowed_for_this_chroma_partition |
+      is_cfl_allowed_for_sdp(cm, xd, ptree_luma, PARTITION_NONE, bsize);
+  RD_STATS rdc;
+  av2_invalid_rd_stats(&rdc);
+  av2_nonrd_part_pick_sb_modes(cpi, td, tile_data, x, mi_row, mi_col, &rdc,
+                               pc_tree, bsize, ctx, INT64_MAX);
+  ctx->rd_mode_is_ready = 0;
+  encode_merged_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize, ptree,
+                      pc_tree, ptree_luma, ctx);
+}
+
+// Encodes a sub-block (PARTITION_NONE or leaf 4-way split) of the two-level
+// merge the default way.
+static void encode_sub_block_default(AV2_COMP *const cpi, ThreadData *td,
+                                     TileDataEnc *tile_data, TokenExtra **tp,
+                                     MACROBLOCK *const x, int mi_row,
+                                     int mi_col, BLOCK_SIZE bsize,
+                                     PARTITION_TREE *ptree, PC_TREE *pc_tree,
+                                     const PARTITION_TREE *ptree_luma,
+                                     PICK_MODE_CONTEXT *ctx) {
+  AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
+  if (ptree->partition == PARTITION_NONE) {
+    encode_none_block_default(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize,
+                              ptree, pc_tree, ptree_luma, ctx);
+    return;
+  }
+  if (try_merge(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize, ptree,
+                pc_tree, ptree_luma, ctx)) {
+    return;
+  }
+  PARTITION_TREE *sub[SUB_PARTITIONS_SPLIT];
+  const bool ok = get_split_sub_trees(ptree, sub);
+  assert(ok);
+  (void)ok;
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const int hbw = mi_size_wide[bsize] / 2;
+  const int hbh = mi_size_high[bsize] / 2;
+  pc_tree->partitioning = ptree->partition;
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+    PC_TREE *child = NULL;
+    PICK_MODE_CONTEXT *const sub_ctx = setup_split_sub_block(
+        cm, td, xd, mi_row, mi_col, bsize, i, pc_tree, ptree_luma, &child);
+    encode_none_block_default(
+        cpi, td, tile_data, tp, x, mi_row + (i >> 1) * hbh,
+        mi_col + (i & 1) * hbw, subsize, sub[i], child,
+        get_partition_subtree_const(ptree_luma, i), sub_ctx);
+  }
+}
+
+// Encodes a leaf 4-way split whose first num_searched sub-blocks have already
+// been mode searched in the current context, and searches the rest (as
+// try_merge() does once a sub-block is not a merge candidate).
+static void encode_leaf_split_searched(
+    AV2_COMP *const cpi, ThreadData *td, TileDataEnc *tile_data,
+    TokenExtra **tp, MACROBLOCK *const x, int mi_row, int mi_col,
+    BLOCK_SIZE bsize, const PARTITION_TREE *ptree, PC_TREE *pc_tree,
+    const PARTITION_TREE *ptree_luma, int num_searched) {
+  AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const int hbw = mi_size_wide[bsize] / 2;
+  const int hbh = mi_size_high[bsize] / 2;
+  const REGION_TYPE region = pc_tree->region_type;
+  pc_tree->partitioning = ptree->partition;
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+    PC_TREE *child = NULL;
+    PICK_MODE_CONTEXT *ctx = NULL;
+    if (i < num_searched) {
+      child = pc_tree->split[region][i];
+      ctx = is_inter_sdp_chroma(cm, region, xd->tree_type)
+                ? child->none_chroma
+                : child->none[region];
+      xd->is_cfl_allowed_in_sdp =
+          child->is_cfl_allowed_for_this_chroma |
+          is_cfl_allowed_for_sdp(cm, xd,
+                                 get_partition_subtree_const(ptree_luma, i),
+                                 PARTITION_NONE, subsize);
+    } else {
+      ctx = setup_split_sub_block(cm, td, xd, mi_row, mi_col, bsize, i, pc_tree,
+                                  ptree_luma, &child);
+      RD_STATS rdc;
+      av2_invalid_rd_stats(&rdc);
+      av2_nonrd_part_pick_sb_modes(
+          cpi, td, tile_data, x, mi_row + (i >> 1) * hbh,
+          mi_col + (i & 1) * hbw, &rdc, child, subsize, ctx, INT64_MAX);
+    }
+    encode_split_sub_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize, i,
+                           ctx, OUTPUT_ENABLED);
+  }
+}
+
+// Encodes the evaluated partition of a sub-block of the two-level merge.
+static void encode_sub_block_result(AV2_COMP *const cpi, ThreadData *td,
+                                    TileDataEnc *tile_data, TokenExtra **tp,
+                                    MACROBLOCK *const x, int mi_row, int mi_col,
+                                    BLOCK_SIZE bsize, PARTITION_TREE *ptree,
+                                    PC_TREE *pc_tree,
+                                    const PARTITION_TREE *ptree_luma,
+                                    PICK_MODE_CONTEXT *ctx, bool merged) {
+  if (ptree->partition == PARTITION_NONE || merged) {
+    encode_merged_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize, ptree,
+                        pc_tree, ptree_luma, ctx);
+  } else {
+    encode_four_way_split(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize,
+                          ptree, pc_tree, ptree_luma);
+  }
+}
+
+// Checks merging a 64x64 4-way split whose sub-blocks are PARTITION_NONE or
+// leaf 4-way splits into PARTITION_NONE. The sub-blocks are evaluated in
+// dry-run mode (including the merge check on the leaf 4-way splits). If all the
+// resulting blocks are inter skip blocks with the same reference frame,
+// PARTITION_NONE is searched and picked if it has a lower rd cost without
+// increasing the distortion by more than 1/8.
+static bool try_merge_two_level(
+    AV2_COMP *const cpi, ThreadData *td, TileDataEnc *tile_data,
+    TokenExtra **tp, MACROBLOCK *const x, int mi_row, int mi_col,
+    BLOCK_SIZE bsize, PARTITION_TREE *ptree,
+    PARTITION_TREE *const sub_ptree[SUB_PARTITIONS_SPLIT], PC_TREE *pc_tree,
+    const PARTITION_TREE *ptree_luma, PICK_MODE_CONTEXT *ctx_none) {
+  AV2_COMMON *const cm = &cpi->common;
+  MACROBLOCKD *const xd = &x->e_mbd;
+  if (bsize != BLOCK_64X64 || cm->quant_params.base_qindex <= 100) return false;
+  const REGION_TYPE parent_region_type =
+      pc_tree->parent ? pc_tree->parent->region_type : INTRA_REGION;
+  if (!is_none_and_split_allowed(cm, xd, parent_region_type, mi_row, mi_col,
+                                 bsize, &pc_tree->chroma_ref_info)) {
+    return false;
+  }
+  const int block_avg_sad = get_block_avg_sad(cpi, x, mi_row, mi_col, bsize,
+                                              &pc_tree->chroma_ref_info);
+  if (block_avg_sad < 0 || block_avg_sad > MERGE_MAX_AVG_SAD) return false;
+
+  const int orig_rdmult = x->rdmult;
+  setup_block_rdmult(cpi, x, mi_row, mi_col, bsize, NO_AQ, NULL);
+  const int num_planes = av2_num_planes(cm);
+  RD_SEARCH_MACROBLOCK_CONTEXT x_ctx;
+  av2_save_context(x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+  const REF_MV_BANK orig_ref_mv_bank = xd->ref_mv_bank;
+  const WARP_PARAM_BANK orig_warp_param_bank = xd->warp_param_bank;
+  REF_MV_BANK prev_ref_mv_bank = orig_ref_mv_bank;
+  WARP_PARAM_BANK prev_warp_param_bank = orig_warp_param_bank;
+
+  const BLOCK_SIZE subsize = get_partition_subsize(bsize, PARTITION_SPLIT);
+  const BLOCK_SIZE subsubsize = get_partition_subsize(subsize, PARTITION_SPLIT);
+  const int hbw = mi_size_wide[bsize] / 2;
+  const int hbh = mi_size_high[bsize] / 2;
+  int thr_sub_start[MB_MODE_COUNT];
+  int thr_subsub_start[MB_MODE_COUNT];
+  memcpy(thr_sub_start, x->thresh_freq_fact[subsize], sizeof(thr_sub_start));
+  memcpy(thr_subsub_start, x->thresh_freq_fact[subsubsize],
+         sizeof(thr_subsub_start));
+
+  PC_TREE *sub_pc[SUB_PARTITIONS_SPLIT] = { NULL };
+  PICK_MODE_CONTEXT *sub_ctx[SUB_PARTITIONS_SPLIT] = { NULL };
+  SubBlockEval eval[SUB_PARTITIONS_SPLIT];
+  int sub_rate[SUB_PARTITIONS_SPLIT] = { 0 };
+  MV_REFERENCE_FRAME ref_frame = NONE_FRAME;
+  bool ref_set = false;
+  int num_done = 0;
+  int fail_num_searched = 0;
+  bool abort = false;
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT && !abort; ++i) {
+    const int sub_mi_row = mi_row + (i >> 1) * hbh;
+    const int sub_mi_col = mi_col + (i & 1) * hbw;
+    const PARTITION_TREE *const sub_luma =
+        get_partition_subtree_const(ptree_luma, i);
+    sub_ctx[i] = setup_split_sub_block(cm, td, xd, mi_row, mi_col, bsize, i,
+                                       pc_tree, ptree_luma, &sub_pc[i]);
+    const bool encode_result = i != SUB_PARTITIONS_SPLIT - 1;
+    if (sub_ptree[i]->partition == PARTITION_NONE) {
+      xd->is_cfl_allowed_in_sdp =
+          sub_pc[i]->is_cfl_allowed_for_this_chroma |
+          sub_ptree[i]->is_cfl_allowed_for_this_chroma_partition |
+          is_cfl_allowed_for_sdp(cm, xd, sub_luma, PARTITION_NONE, subsize);
+      RD_STATS rdc;
+      av2_invalid_rd_stats(&rdc);
+      av2_nonrd_part_pick_sb_modes(cpi, td, tile_data, x, sub_mi_row,
+                                   sub_mi_col, &rdc, sub_pc[i], subsize,
+                                   sub_ctx[i], INT64_MAX);
+      if (!is_merge_candidate(sub_ctx[i], &rdc, xd->tree_type, &ref_frame,
+                              &ref_set)) {
+        // Encode this sub-block the default way, reusing this mode search.
+        if (rdc.rate != INT_MAX && rdc.rdcost != INT64_MAX) {
+          sub_ctx[i]->rd_mode_is_ready = 1;
+        }
+        abort = true;
+        break;
+      }
+      eval[i].merged = false;
+      eval[i].rdcost = 0;
+      eval[i].dist = rdc.dist;
+      sub_rate[i] = rdc.rate;
+      update_picked_ref_mask(cpi, x, sub_ctx[i], subsize, sub_mi_row,
+                             sub_mi_col);
+      if (encode_result) {
+        av2_nonrd_part_encode_b(cpi, tile_data, td, tp, sub_mi_row, sub_mi_col,
+                                DRY_RUN_NORMAL, subsize, sub_ctx[i]);
+      }
+    } else {
+      const int status = eval_leaf_split_sub_block(
+          cpi, td, tile_data, tp, x, sub_mi_row, sub_mi_col, subsize,
+          sub_ptree[i], sub_pc[i], sub_luma, sub_ctx[i], &ref_frame, &ref_set,
+          encode_result, &eval[i], &fail_num_searched);
+      if (status == SUB_EVAL_FAIL) {
+        abort = true;
+        break;
+      }
+      if (status == SUB_EVAL_DONE) abort = true;
+    }
+    num_done = i + 1;
+    prev_ref_mv_bank = xd->ref_mv_bank;
+    prev_warp_param_bank = xd->warp_param_bank;
+  }
+
+  if (abort) {
+    // Encode the evaluated sub-blocks, and the rest the default way.
+    const REF_MV_BANK fail_ref_mv_bank = xd->ref_mv_bank;
+    const WARP_PARAM_BANK fail_warp_param_bank = xd->warp_param_bank;
+    av2_restore_context(cm, x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+    xd->ref_mv_bank = prev_ref_mv_bank;
+    xd->warp_param_bank = prev_warp_param_bank;
+    pc_tree->partitioning = ptree->partition;
+    for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+      const int sub_mi_row = mi_row + (i >> 1) * hbh;
+      const int sub_mi_col = mi_col + (i & 1) * hbw;
+      const PARTITION_TREE *const sub_luma =
+          get_partition_subtree_const(ptree_luma, i);
+      if (i < num_done) {
+        encode_sub_block_result(cpi, td, tile_data, tp, x, sub_mi_row,
+                                sub_mi_col, subsize, sub_ptree[i], sub_pc[i],
+                                sub_luma, sub_ctx[i], eval[i].merged);
+        continue;
+      }
+      if (i == num_done && fail_num_searched > 0) {
+        xd->ref_mv_bank = fail_ref_mv_bank;
+        xd->warp_param_bank = fail_warp_param_bank;
+        encode_leaf_split_searched(cpi, td, tile_data, tp, x, sub_mi_row,
+                                   sub_mi_col, subsize, sub_ptree[i], sub_pc[i],
+                                   sub_luma, fail_num_searched);
+        continue;
+      }
+      if (sub_ctx[i] == NULL) {
+        sub_ctx[i] = setup_split_sub_block(cm, td, xd, mi_row, mi_col, bsize, i,
+                                           pc_tree, ptree_luma, &sub_pc[i]);
+      }
+      encode_sub_block_default(cpi, td, tile_data, tp, x, sub_mi_row,
+                               sub_mi_col, subsize, sub_ptree[i], sub_pc[i],
+                               sub_luma, sub_ctx[i]);
+    }
+    x->rdmult = orig_rdmult;
+    return true;
+  }
+
+  // All the evaluated blocks are inter skip blocks with the same reference:
+  // check PARTITION_NONE.
+  const REF_MV_BANK split_ref_mv_bank = xd->ref_mv_bank;
+  const WARP_PARAM_BANK split_warp_param_bank = xd->warp_param_bank;
+  xd->ref_mv_bank = orig_ref_mv_bank;
+  xd->warp_param_bank = orig_warp_param_bank;
+  av2_restore_context(cm, x, &x_ctx, mi_row, mi_col, bsize, num_planes);
+  int partition_cost[ALL_PARTITION_TYPES];
+  av2_nonrd_part_init_partition_costs(
+      cm, x, xd->tree_type, parent_region_type, mi_row, mi_col,
+      xd->plane[1].subsampling_x, xd->plane[1].subsampling_y, bsize, ptree_luma,
+      &pc_tree->chroma_ref_info, partition_cost);
+  int sub_none_costs[SUB_PARTITIONS_SPLIT] = { 0 };
+  const int split_sig_cost = get_four_way_split_partition_cost(
+      cm, x, mi_row, mi_col, bsize, pc_tree, ptree_luma, partition_cost,
+      sub_none_costs);
+  int64_t split_rdcost = RDCOST(x->rdmult, split_sig_cost, 0);
+  int64_t split_dist = 0;
+  for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+    if (sub_ptree[i]->partition == PARTITION_NONE) {
+      eval[i].rdcost =
+          RDCOST(x->rdmult, sub_rate[i] + sub_none_costs[i], eval[i].dist);
+    }
+    split_rdcost += eval[i].rdcost;
+    split_dist += eval[i].dist;
+  }
+  bool merge = false;
+  bool none_searched = false;
+  int thr_none_saved[MB_MODE_COUNT];
+  const int64_t none_bound =
+      split_rdcost - RDCOST(x->rdmult, partition_cost[PARTITION_NONE], 0);
+  if (none_bound > 0) {
+    xd->is_cfl_allowed_in_sdp =
+        pc_tree->is_cfl_allowed_for_this_chroma |
+        ptree->is_cfl_allowed_for_this_chroma_partition |
+        is_cfl_allowed_for_sdp(cm, xd, ptree_luma, PARTITION_NONE, bsize);
+    memcpy(thr_none_saved, x->thresh_freq_fact[bsize], sizeof(thr_none_saved));
+    none_searched = true;
+    RD_STATS none_rdc;
+    av2_invalid_rd_stats(&none_rdc);
+    av2_nonrd_part_pick_sb_modes(cpi, td, tile_data, x, mi_row, mi_col,
+                                 &none_rdc, pc_tree, bsize, ctx_none,
+                                 none_bound);
+    merge = none_rdc.rate != INT_MAX && none_rdc.rdcost != INT64_MAX &&
+            RDCOST(x->rdmult, none_rdc.rate + partition_cost[PARTITION_NONE],
+                   none_rdc.dist) < split_rdcost &&
+            none_rdc.dist <= split_dist + (split_dist >> 3);
+  }
+  if (merge) {
+    memcpy(x->thresh_freq_fact[subsize], thr_sub_start, sizeof(thr_sub_start));
+    memcpy(x->thresh_freq_fact[subsubsize], thr_subsub_start,
+           sizeof(thr_subsub_start));
+    encode_merged_block(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize, ptree,
+                        pc_tree, ptree_luma, ctx_none);
+  } else {
+    if (none_searched) {
+      memcpy(x->thresh_freq_fact[bsize], thr_none_saved,
+             sizeof(thr_none_saved));
+    }
+    xd->ref_mv_bank = split_ref_mv_bank;
+    xd->warp_param_bank = split_warp_param_bank;
+    pc_tree->partitioning = ptree->partition;
+    for (int i = 0; i < SUB_PARTITIONS_SPLIT; ++i) {
+      encode_sub_block_result(cpi, td, tile_data, tp, x,
+                              mi_row + (i >> 1) * hbh, mi_col + (i & 1) * hbw,
+                              subsize, sub_ptree[i], sub_pc[i],
+                              get_partition_subtree_const(ptree_luma, i),
+                              sub_ctx[i], eval[i].merged);
+    }
+  }
+  x->rdmult = orig_rdmult;
+  return true;
+}
+
+bool av2_nonrd_check_partition_merge_split(
+    AV2_COMP *cpi, ThreadData *td, TileDataEnc *tile_data, TokenExtra **tp,
+    int mi_row, int mi_col, BLOCK_SIZE bsize, PARTITION_TREE *ptree,
+    PC_TREE *pc_tree, const PARTITION_TREE *ptree_luma,
+    PICK_MODE_CONTEXT *ctx_none) {
+  MACROBLOCK *const x = &td->mb;
+  if (!allow_partition_merge_split_sb(cpi, x, ptree)) return false;
+  AV2_COMMON *const cm = &cpi->common;
+  const bool is_none = ptree->partition == PARTITION_NONE;
+  PARTITION_TREE *sub_ptree[SUB_PARTITIONS_SPLIT];
+  bool two_level = false;
+  if (!is_none && !is_leaf_split_partition(cm, mi_row, mi_col, bsize, ptree)) {
+    if (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN ||
+        !is_two_level_split_partition(cm, mi_row, mi_col, bsize, ptree,
+                                      sub_ptree)) {
+      return false;
+    }
+    two_level = true;
+  }
+
+  MACROBLOCKD *const xd = &x->e_mbd;
+  set_chroma_ref_info(
+      xd->tree_type, mi_row, mi_col, pc_tree->index, bsize,
+      &pc_tree->chroma_ref_info,
+      pc_tree->parent ? &pc_tree->parent->chroma_ref_info : NULL,
+      pc_tree->parent ? pc_tree->parent->block_size : BLOCK_INVALID,
+      pc_tree->parent ? pc_tree->parent->partitioning : PARTITION_NONE,
+      xd->plane[1].subsampling_x, xd->plane[1].subsampling_y);
+  ctx_none->chroma_ref_info = pc_tree->chroma_ref_info;
+  ctx_none->mic.chroma_ref_info = pc_tree->chroma_ref_info;
+  if (two_level) {
+    return try_merge_two_level(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize,
+                               ptree, sub_ptree, pc_tree, ptree_luma, ctx_none);
+  }
+  if (is_none) {
+    return try_split_partition(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize,
+                               ptree, pc_tree, ptree_luma, ctx_none);
+  }
+  return try_merge(cpi, td, tile_data, tp, x, mi_row, mi_col, bsize, ptree,
+                   pc_tree, ptree_luma, ctx_none);
 }
