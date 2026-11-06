@@ -102,6 +102,39 @@ void av2_choose_var_based_partitioning(AV2_COMP *cpi,
                                        int mi_row, int mi_col,
                                        unsigned int source_sad);
 
+/*!\brief Checks merging or splitting the variance-based partition of a block.
+ *
+ * Called from av2_nonrd_use_partition() for each partition tree node when
+ * rt_sf.nonrd_check_partition_merge_split is enabled:
+ * - A PARTITION_NONE block with large prediction residual is checked against
+ *   its 4-way split.
+ * - A leaf 4-way split (into PARTITION_NONE blocks) is checked against
+ *   PARTITION_NONE.
+ *
+ * \ingroup variance_partition
+ *
+ * \param[in]    cpi         Top-level encoder structure
+ * \param[in]    td          Pointer to thread data
+ * \param[in]    tile_data   Pointer to tile-level encoder data structure
+ * \param[in]    tp          Pointer to the starting token
+ * \param[in]    mi_row      Row coordinate of the block (in MI units)
+ * \param[in]    mi_col      Column coordinate of the block (in MI units)
+ * \param[in]    bsize       Current block size
+ * \param[in]    ptree       Partition tree node of the block
+ * \param[in]    pc_tree     PC_TREE node of the block
+ * \param[in]    ptree_luma  Luma partition tree (for chroma)
+ * \param[in]    ctx_none    PARTITION_NONE mode context of the block
+ *
+ * \return true if the block was encoded here. If false is returned for a
+ * PARTITION_NONE block, ctx_none may hold the PARTITION_NONE mode search result
+ * (rd_mode_is_ready) for reuse.
+ */
+bool av2_nonrd_check_partition_merge_split(
+    AV2_COMP *cpi, ThreadData *td, TileDataEnc *tile_data, TokenExtra **tp,
+    int mi_row, int mi_col, BLOCK_SIZE bsize, PARTITION_TREE *ptree,
+    PC_TREE *pc_tree, const PARTITION_TREE *ptree_luma,
+    PICK_MODE_CONTEXT *ctx_none);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

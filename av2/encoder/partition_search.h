@@ -69,6 +69,24 @@ void setup_block_rdmult(const AV2_COMP *const cpi, MACROBLOCK *const x,
                         int mi_row, int mi_col, BLOCK_SIZE bsize,
                         AQ_MODE aq_mode, MB_MODE_INFO *mbmi);
 
+// Mode search, block encoding, and partition cost helpers used by the
+// partition merge/split checks for nonrd_use_partition (var_based_part.c).
+// best_rdcost bounds the mode search (INT64_MAX for no bound).
+void av2_nonrd_part_pick_sb_modes(AV2_COMP *const cpi, ThreadData *td,
+                                  TileDataEnc *tile_data, MACROBLOCK *const x,
+                                  int mi_row, int mi_col, RD_STATS *rd_cost,
+                                  const PC_TREE *pc_tree, BLOCK_SIZE bsize,
+                                  PICK_MODE_CONTEXT *ctx, int64_t best_rdcost);
+void av2_nonrd_part_encode_b(const AV2_COMP *const cpi, TileDataEnc *tile_data,
+                             ThreadData *td, TokenExtra **tp, int mi_row,
+                             int mi_col, RUN_TYPE dry_run, BLOCK_SIZE bsize,
+                             const PICK_MODE_CONTEXT *const ctx);
+void av2_nonrd_part_init_partition_costs(
+    const AV2_COMMON *const cm, const MACROBLOCK *const x, TREE_TYPE tree_type,
+    REGION_TYPE parent_region_type, int mi_row, int mi_col, int ssx, int ssy,
+    BLOCK_SIZE bsize, const PARTITION_TREE *ptree_luma,
+    const CHROMA_REF_INFO *chroma_ref_info, int *partition_cost);
+
 // Check whether this is chroma component of an intra region in inter frame
 static INLINE int is_inter_sdp_chroma(const AV2_COMMON *const cm,
                                       REGION_TYPE cur_region_type,
