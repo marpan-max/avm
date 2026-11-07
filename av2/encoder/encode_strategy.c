@@ -765,6 +765,7 @@ int av2_get_refresh_frame_flags(
   // Shown key-frames overwrite all reference slots
   if (av2_is_shown_keyframe(cpi, frame_params->frame_type) &&
       cpi->common.seq_params.max_mlayer_id == 0 && !cpi->no_show_fwd_kf) {
+    cpi->rc.lt_ref_disp_order = cur_disp_order;
     return (1 << cpi->common.seq_params.ref_frames) - 1;
   }
 
@@ -897,6 +898,44 @@ int av2_get_refresh_frame_flags(
   // If there is an open slot, refresh that one instead of replacing a reference
   if (free_fb_index != INVALID_IDX) {
     return 1 << free_fb_index;
+  }
+
+  // In realtime mode with implicit reference mapping and >= 3 DPB slots, keep
+  // one slot as a non-boosted long-term reference refreshed periodically while
+  // the remaining slots hold the most recent frames.
+  if (cpi->oxcf.mode == REALTIME && frame_update_type == LF_UPDATE &&
+      !cpi->common.bru.enabled &&
+      !cpi->common.seq_params.enable_explicit_ref_frame_map &&
+      cpi->common.seq_params.max_mlayer_id == 0 &&
+      !cpi->oxcf.unit_test_cfg.multi_layers_lag_test &&
+      cpi->common.seq_params.ref_frames >= 3 &&
+      cpi->rc.lt_ref_disp_order >= 0) {
+    const int period =
+        (cpi->common.width * cpi->common.height <= 640 * 480) ? 80 : 32;
+    int lt_idx = INVALID_IDX;
+    int oldest_idx = INVALID_IDX;
+    int oldest_order = INT32_MAX;
+    for (int idx = 0; idx < cpi->common.seq_params.ref_frames; ++idx) {
+      const RefFrameMapPair *const pair = &ref_frame_map_pairs[idx];
+      if (pair->ref_frame_for_inference == -1) continue;
+      if ((olk_flags_to_keep >> idx) & 1u) continue;
+      if (lt_idx == INVALID_IDX &&
+          pair->disp_order == cpi->rc.lt_ref_disp_order) {
+        lt_idx = idx;
+        continue;
+      }
+      if (pair->disp_order < oldest_order) {
+        oldest_order = pair->disp_order;
+        oldest_idx = idx;
+      }
+    }
+    if (lt_idx != INVALID_IDX) {
+      if (cur_disp_order - cpi->rc.lt_ref_disp_order >= period) {
+        cpi->rc.lt_ref_disp_order = cur_disp_order;
+        return 1 << lt_idx;
+      }
+      if (oldest_idx != INVALID_IDX) return 1 << oldest_idx;
+    }
   }
 
   const int update_arf = frame_update_type == ARF_UPDATE;

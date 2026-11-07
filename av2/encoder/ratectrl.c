@@ -325,6 +325,7 @@ void av2_rc_init(const AV2EncoderConfig *oxcf, RATE_CONTROL *rc) {
   rc->next_key_frame_forced = 0;
 
   rc->high_source_sad = 0;
+  rc->lt_ref_disp_order = -1;
   rc->avg_source_sad = 0;
   rc->prev_avg_source_sad = 0;
   rc->frame_source_sad = 0;
@@ -444,7 +445,9 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
                            : clamp(rc->q_1_frame / 8, 1, 16);
     }
   } else {
-    max_delta_down = clamp(rc->q_1_frame / 4, 1, 32);
+    max_delta_down = (rc->frames_since_key > 30)
+                         ? clamp(rc->q_1_frame / 8, 1, 16)
+                         : clamp(rc->q_1_frame / 4, 1, 32);
     max_delta_up = overshoot_buffer_low ? 48 : 16;
   }
   const int change_avg_frame_bandwidth =
@@ -2381,7 +2384,7 @@ int av2_calc_iframe_target_size_one_pass_cbr(const AV2_COMP *cpi) {
     // In realtime mode, use a smaller initial keyframe target for non-screen
     // content so less buffer budget is consumed on the first frame.
     const int factor =
-        (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN) ? 7 : 3;
+        (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN) ? 7 : 2;
     const int64_t initial_target = (cpi->oxcf.mode == REALTIME)
                                        ? rc->starting_buffer_level * factor / 2
                                        : rc->starting_buffer_level / 2;
