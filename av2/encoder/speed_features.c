@@ -1100,6 +1100,7 @@ static void set_rt_speed_features_framesize_independent(
       sf->rt_sf.prune_intra_mode_in_interframe = 1;
       sf->rt_sf.prune_intrabc_on_keyframe = 1;
       sf->rt_sf.rtc_use_lt_ref = 0;
+      sf->mv_sf.newmv_drl_search_limit = 2;
       // For screen content with --enable-intrabc-ext, selectively enable
       // pruned IntraBC evaluation on high-SAD delta frames (scene/slide
       // changes) when scene detection is active, or on all delta frames when

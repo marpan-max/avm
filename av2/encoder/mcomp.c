@@ -258,8 +258,12 @@ int get_opfl_mv_iterations(const AV2_COMP *cpi, const MB_MODE_INFO *mbmi) {
 
   // Optical flow MV search is allowed for NEWMV, WARP_NEWMV, and WARPMV only,
   // since it shows little improvements in compound modes.
-  if (mbmi->mode == NEWMV || mbmi->mode == WARP_NEWMV || mbmi->mode == WARPMV)
+  if (mbmi->mode == NEWMV || mbmi->mode == WARP_NEWMV || mbmi->mode == WARPMV) {
+    if (cpi->oxcf.mode == REALTIME || cpi->speed >= 6) {
+      return mbmi->ref_mv_idx[0] == 0 ? 1 : 0;
+    }
     return 3;
+  }
 
   return 0;
 }
@@ -334,6 +338,10 @@ int opfl_refine_fullpel_mv_one_sided(
   av2_opfl_mv_refinement(tmp1, bw, gx0, gy0, bw, bw, bh, 1, 0, grad_prec_bits,
                          bits, &vx0, &vy0, &vx1, &vy1);
 #endif
+
+  if ((cpi->oxcf.mode == REALTIME || cpi->speed >= 6) && vx0 == 0 && vy0 == 0) {
+    return 1;
+  }
 
   mv_refined[0].as_mv.row += vy0;
   mv_refined[0].as_mv.col += vx0;

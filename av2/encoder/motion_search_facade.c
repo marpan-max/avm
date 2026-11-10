@@ -249,7 +249,11 @@ void av2_single_motion_search(const AV2_COMP *const cpi, MACROBLOCK *x,
         this_best_mv = smv;
         best_opfl_sme = INT_MAX;
         int term = 0;
-        for (int it = 0; it < 1 + opfl_its; it++) {
+        const int this_opfl_its =
+            ((cpi->oxcf.mode == REALTIME || cpi->speed >= 6) && m > 0)
+                ? 0
+                : opfl_its;
+        for (int it = 0; it < 1 + this_opfl_its; it++) {
           if (it > 0) {
             smv = this_best_mv;
             FULLPEL_MV prev_smv = smv;
