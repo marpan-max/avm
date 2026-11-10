@@ -528,6 +528,10 @@ static int adjust_q_cbr(const AV2_COMP *cpi, int q, int active_worst_quality) {
     // Limit the increase in Q from previous frame.
     else if (q - rc->q_1_frame > max_delta_up)
       q = rc->q_1_frame + max_delta_up;
+  } else if (cm->current_frame.frame_type == KEY_FRAME &&
+             cpi->is_screen_content_type &&
+             cm->current_frame.frame_number == 0) {
+    q = AVMMAX(q - 28, cpi->rc.best_quality);
   }
   // For single spatial layer: if resolution has increased push q closer
   // to the active_worst to avoid excess overshoot.
@@ -962,7 +966,10 @@ static int calc_active_worst_quality_no_stats_cbr(const AV2_COMP *cpi) {
       active_worst_quality = AVMMIN(rc->worst_quality, ambient_qp);
       max_adjustment_down = AVMMIN(4, active_worst_quality / 16);
     } else {
-      active_worst_quality = AVMMIN(rc->worst_quality, ambient_qp * 5 / 4);
+      active_worst_quality =
+          cpi->is_screen_content_type
+              ? AVMMIN(rc->worst_quality, ambient_qp * 9 / 8)
+              : AVMMIN(rc->worst_quality, ambient_qp * 5 / 4);
       max_adjustment_down = active_worst_quality / 3;
     }
     if (max_adjustment_down) {
@@ -1062,6 +1069,10 @@ static int calc_active_best_quality_no_stats_cbr(const AV2_COMP *cpi,
       active_best_quality = rtc_minq[rc->avg_frame_qindex[frame_type]];
     else
       active_best_quality = rtc_minq[active_worst_quality];
+    if (cpi->is_screen_content_type &&
+        rc->buffer_level >= rc->optimal_buffer_level) {
+      active_best_quality = active_best_quality * 15 / 16;
+    }
   }
   if (rc->buffer_level > rc->optimal_buffer_level) {
     int max_adjustment_down = (active_best_quality - rc->best_quality) / 2;
@@ -2379,12 +2390,8 @@ int av2_calc_iframe_target_size_one_pass_cbr(const AV2_COMP *cpi) {
   const RATE_CONTROL *rc = &cpi->rc;
   int target;
   if (cpi->common.current_frame.frame_number == 0) {
-    // In realtime mode, use a smaller initial keyframe target for non-screen
-    // content so less buffer budget is consumed on the first frame.
-    const int factor =
-        (cpi->oxcf.tune_cfg.content == AVM_CONTENT_SCREEN) ? 7 : 3;
     const int64_t initial_target = (cpi->oxcf.mode == REALTIME)
-                                       ? rc->starting_buffer_level * factor / 2
+                                       ? rc->starting_buffer_level * 3 / 2
                                        : rc->starting_buffer_level / 2;
     target = (initial_target > INT_MAX) ? INT_MAX : (int)initial_target;
   } else {
