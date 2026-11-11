@@ -309,6 +309,24 @@ static void set_rt_speed_feature_framesize_dependent(AV2_COMP *const cpi,
       memcpy(cpi->winner_mode_params.tx_domain_dist_threshold,
              tx_domain_dist_thresholds[sf->rd_sf.tx_domain_dist_thres_level],
              sizeof(cpi->winner_mode_params.tx_domain_dist_threshold));
+      if (cpi->oxcf.algo_cfg.enable_trellis_quant == 2) {
+        sf->rd_sf.optimize_coefficients = NO_TRELLIS_OPT;
+      }
+      sf->intra_sf.disable_paeth_intra = 1;
+      sf->intra_sf.disable_cfl_intra = 1;
+      sf->intra_sf.disable_mhccp = 1;
+      sf->intra_sf.disable_ibp = 1;
+      sf->inter_sf.disable_drl_reorder = 1;
+    } else if (cpi->oxcf.tune_cfg.content != AVM_CONTENT_SCREEN) {
+      if (cpi->oxcf.algo_cfg.enable_trellis_quant == 2 &&
+          !is_lossless_requested(&cpi->oxcf.rc_cfg)) {
+        sf->rd_sf.optimize_coefficients = FINAL_PASS_TRELLIS_OPT;
+      }
+      sf->intra_sf.disable_paeth_intra = 0;
+      sf->intra_sf.disable_cfl_intra = 0;
+      sf->intra_sf.disable_mhccp = 0;
+      sf->intra_sf.disable_ibp = 0;
+      sf->inter_sf.disable_drl_reorder = 0;
     }
   }
 }
@@ -1082,6 +1100,14 @@ static void set_rt_speed_features_framesize_independent(
     }
     sf->intra_sf.skip_intra_in_interframe = 2;
     sf->rt_sf.prune_intra_mode_in_interframe = 2;
+    if (cpi->oxcf.algo_cfg.enable_trellis_quant == 2) {
+      sf->rd_sf.optimize_coefficients = NO_TRELLIS_OPT;
+    }
+    sf->intra_sf.disable_paeth_intra = 1;
+    sf->intra_sf.disable_cfl_intra = 1;
+    sf->intra_sf.disable_mhccp = 1;
+    sf->intra_sf.disable_ibp = 1;
+    sf->inter_sf.disable_drl_reorder = 1;
     sf->rt_sf.rtc_use_lt_ref =
         !cpi->is_screen_content_type && cpi->common.number_tlayers == 1 &&
         cpi->common.number_mlayers == 1 &&
@@ -1334,6 +1360,7 @@ static AVM_INLINE void init_inter_sf(INTER_MODE_SPEED_FEATURES *inter_sf) {
   inter_sf->limit_max_ref_mv_idx = false;
   inter_sf->limit_single_ref_mv_idx = 0;
   inter_sf->skip_amvd_search_in_dry_pass = false;
+  inter_sf->disable_drl_reorder = 0;
 }
 
 static AVM_INLINE void init_interp_sf(INTERP_FILTER_SPEED_FEATURES *interp_sf) {
@@ -1357,6 +1384,10 @@ static AVM_INLINE void init_intra_sf(INTRA_MODE_SPEED_FEATURES *intra_sf) {
   intra_sf->intrabc_skip_int_qtr_rd = false;
 
   intra_sf->disable_smooth_intra = 0;
+  intra_sf->disable_paeth_intra = 0;
+  intra_sf->disable_cfl_intra = 0;
+  intra_sf->disable_mhccp = 0;
+  intra_sf->disable_ibp = 0;
 }
 
 static AVM_INLINE void init_tx_sf(TX_SPEED_FEATURES *tx_sf) {
@@ -1651,6 +1682,16 @@ void av2_set_speed_features_framesize_dependent(AV2_COMP *cpi, int speed) {
         !sf->part_sf.disable_uneven_4way_partitions;
     cpi->common.seq_params.enable_masked_compound &=
         !sf->inter_sf.disable_masked_comp;
+    cpi->common.seq_params.enable_cfl_intra =
+        oxcf->intra_mode_cfg.enable_cfl_intra &&
+        !sf->intra_sf.disable_cfl_intra;
+    cpi->common.seq_params.enable_mhccp =
+        oxcf->intra_mode_cfg.enable_mhccp && !sf->intra_sf.disable_mhccp;
+    cpi->common.seq_params.enable_ibp =
+        oxcf->intra_mode_cfg.enable_ibp && !sf->intra_sf.disable_ibp;
+    cpi->common.seq_params.enable_drl_reorder =
+        sf->inter_sf.disable_drl_reorder ? DRL_REORDER_DISABLED
+                                         : oxcf->tool_cfg.enable_drl_reorder;
   }
 }
 

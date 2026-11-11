@@ -9381,7 +9381,8 @@ static void av2_evaluate_intra_modes_in_inter_frame(
                 (mbmi->mode == SMOOTH_PRED || mbmi->mode == SMOOTH_H_PRED ||
                  mbmi->mode == SMOOTH_V_PRED))
               continue;
-            if (!cpi->oxcf.intra_mode_cfg.enable_paeth_intra &&
+            if ((!cpi->oxcf.intra_mode_cfg.enable_paeth_intra ||
+                 cpi->sf.intra_sf.disable_paeth_intra) &&
                 mbmi->mode == PAETH_PRED)
               continue;
             if (mbmi->mrl_index > 0 &&

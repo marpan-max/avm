@@ -1132,6 +1132,9 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // Both conditions must hold for the skip to take effect (see
   // get_num_amvd_modes()). Enabled for speed >= 3.
   bool skip_amvd_search_in_dry_pass;
+
+  // Disable DRL reordering for sequence.
+  int disable_drl_reorder;
 } INTER_MODE_SPEED_FEATURES;
 
 typedef struct INTERP_FILTER_SPEED_FEATURES {
@@ -1165,6 +1168,18 @@ typedef struct INTRA_MODE_SPEED_FEATURES {
 
   // Enable/disable smooth intra modes.
   int disable_smooth_intra;
+
+  // Enable/disable Paeth intra modes.
+  int disable_paeth_intra;
+
+  // Disable CFL uv intra mode for sequence.
+  int disable_cfl_intra;
+
+  // Disable multi-hypothesis cross-component prediction (MHCCP) for sequence.
+  int disable_mhccp;
+
+  // Disable intra bi-prediction (IBP) for sequence.
+  int disable_ibp;
 
   // prune palette search
   // 0: No pruning

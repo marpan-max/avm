@@ -382,8 +382,8 @@ static int cfl_rd_pick_alpha(MACROBLOCK *const x, const AV2_COMP *const cpi,
   assert(xd->tree_type != LUMA_PART);
   const BLOCK_SIZE plane_bsize = get_mb_plane_block_size(
       xd, mbmi, PLANE_TYPE_UV, pd->subsampling_x, pd->subsampling_y);
-  assert(((is_cfl_allowed(cpi->oxcf.intra_mode_cfg.enable_cfl_intra, xd) &&
-           cpi->oxcf.intra_mode_cfg.enable_cfl_intra) ||
+  assert(((is_cfl_allowed(cpi->common.seq_params.enable_cfl_intra, xd) &&
+           cpi->common.seq_params.enable_cfl_intra) ||
           is_mhccp_allowed(&cpi->common, xd)));
 
   assert(plane_bsize < BLOCK_SIZES_ALL);
@@ -756,7 +756,9 @@ int64_t av2_rd_pick_intra_sbuv_mode(const AV2_COMP *const cpi, MACROBLOCK *x,
           mode <= UV_SMOOTH_H_PRED)
         continue;
 
-      if (!intra_mode_cfg->enable_paeth_intra && mode == UV_PAETH_PRED)
+      if ((!intra_mode_cfg->enable_paeth_intra ||
+           cpi->sf.intra_sf.disable_paeth_intra) &&
+          mode == UV_PAETH_PRED)
         continue;
 
       // Init variables for cfl and angle delta
@@ -774,12 +776,12 @@ int64_t av2_rd_pick_intra_sbuv_mode(const AV2_COMP *const cpi, MACROBLOCK *x,
         if (mbmi->cfl_idx == 0)
           cfl_alpha_rate = cfl_rd_pick_alpha(x, cpi, best_rd);
         if (is_mhccp_allowed(cm, xd)) {
-          if (intra_mode_cfg->enable_cfl_intra)
+          if (cm->seq_params.enable_cfl_intra)
             cfl_idx_rate +=
                 x->mode_costs.cfl_mhccp_cost[mbmi->cfl_idx == CFL_MULTI_PARAM];
         }
         if (mbmi->cfl_idx != CFL_MULTI_PARAM &&
-            intra_mode_cfg->enable_cfl_intra) {
+            cm->seq_params.enable_cfl_intra) {
           cfl_idx_rate += x->mode_costs.cfl_index_cost[mbmi->cfl_idx];
         }
         if (mbmi->cfl_idx == CFL_MULTI_PARAM) {
@@ -816,7 +818,7 @@ int64_t av2_rd_pick_intra_sbuv_mode(const AV2_COMP *const cpi, MACROBLOCK *x,
       if (mode == UV_CFL_PRED &&
           (cm->seq_params.enable_cfl_intra || cm->seq_params.enable_mhccp)) {
         assert((is_cfl_allowed(cm->seq_params.enable_cfl_intra, xd) &&
-                intra_mode_cfg->enable_cfl_intra) ||
+                cm->seq_params.enable_cfl_intra) ||
                is_mhccp_allowed(cm, xd));
       }
       this_rd = RDCOST(x->rdmult, this_rate, tokenonly_rd_stats.dist);
@@ -1811,7 +1813,8 @@ int64_t av2_rd_pick_intra_sby_mode(const AV2_COMP *const cpi, ThreadData *td,
   const bool allow_smooth_intra =
       cpi->oxcf.intra_mode_cfg.enable_smooth_intra &&
       !intra_sf->disable_smooth_intra;
-  const bool allow_paeth_intra = cpi->oxcf.intra_mode_cfg.enable_paeth_intra;
+  const bool allow_paeth_intra = cpi->oxcf.intra_mode_cfg.enable_paeth_intra &&
+                                 !intra_sf->disable_paeth_intra;
   assert(!is_inter_block(mbmi, xd->tree_type));
   int64_t best_model_rd = INT64_MAX;
   mbmi->fsc_mode[xd->tree_type == CHROMA_PART] = 0;

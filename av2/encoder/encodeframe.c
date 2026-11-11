@@ -1895,7 +1895,7 @@ void av2_encode_tile(AV2_COMP *cpi, ThreadData *td, int tile_row,
   av2_init_above_context(&cm->above_contexts, av2_num_planes(cm), tile_row,
                          &td->mb.e_mbd);
 
-  if (cpi->oxcf.intra_mode_cfg.enable_cfl_intra)
+  if (cm->seq_params.enable_cfl_intra || cm->seq_params.enable_mhccp)
     av2_cfl_init(&td->mb.e_mbd.cfl, &cm->seq_params);
 
   av2_crc32c_calculator_init(
