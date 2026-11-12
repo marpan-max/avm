@@ -299,20 +299,6 @@ static void set_good_speed_feature_framesize_dependent(
   sf->part_sf.use_square_partition_only_threshold = BLOCK_LARGEST;
 }
 
-static void set_rt_speed_feature_framesize_dependent(AV2_COMP *const cpi,
-                                                     SPEED_FEATURES *const sf,
-                                                     int speed) {
-  const AV2_COMMON *const cm = &cpi->common;
-  if (speed >= 6) {
-    if (cm->width * cm->height >= 640 * 360) {
-      sf->rd_sf.tx_domain_dist_thres_level = 1;
-      memcpy(cpi->winner_mode_params.tx_domain_dist_threshold,
-             tx_domain_dist_thresholds[sf->rd_sf.tx_domain_dist_thres_level],
-             sizeof(cpi->winner_mode_params.tx_domain_dist_threshold));
-    }
-  }
-}
-
 static void set_good_speed_features_framesize_independent(
     AV2_COMP *const cpi, SPEED_FEATURES *const sf, int speed) {
   const AV2_COMMON *const cm = &cpi->common;
@@ -1063,10 +1049,8 @@ static void set_rt_speed_features_framesize_independent(
     sf->hl_sf.recode_loop = DISALLOW_RECODE;
     sf->lpf_sf.lpf_pick = LPF_PICK_FROM_Q;
     sf->lpf_sf.cdef_pick_method = CDEF_FAST_SEARCH_LVL3;
-    sf->mv_sf.search_method = DIAMOND;
     sf->part_sf.partition_pruning_with_mlp = 0;
     sf->part_sf.partition_search_type = VAR_BASED_PARTITION;
-    sf->rd_sf.tx_domain_dist_thres_level = 2;
     sf->rt_sf.use_nonrd_partition = 1;
     sf->rt_sf.source_metrics_sb = 1;
     sf->rt_sf.disable_primary_ref_frame_search = 1;
@@ -1080,11 +1064,11 @@ static void set_rt_speed_features_framesize_independent(
         sf->rt_sf.overshoot_detection_cbr = FAST_DETECTION_MAXQ;
       }
     }
-    sf->intra_sf.skip_intra_in_interframe = 2;
     sf->rt_sf.prune_intra_mode_in_interframe = 2;
     sf->rt_sf.rtc_use_lt_ref =
-        !cpi->is_screen_content_type && cpi->common.number_tlayers == 1 &&
-        cpi->common.number_mlayers == 1 &&
+        !cpi->is_screen_content_type &&
+        cpi->oxcf.tune_cfg.content != AVM_CONTENT_SCREEN &&
+        cpi->common.number_tlayers == 1 && cpi->common.number_mlayers == 1 &&
         cpi->common.seq_params.max_mlayer_id == 0 &&
         !cpi->common.seq_params.enable_explicit_ref_frame_map &&
         !cpi->oxcf.unit_test_cfg.multi_layers_lag_test &&
@@ -1099,7 +1083,6 @@ static void set_rt_speed_features_framesize_independent(
       sf->intra_sf.skip_intra_in_interframe = 1;
       sf->rt_sf.prune_intra_mode_in_interframe = 1;
       sf->rt_sf.prune_intrabc_on_keyframe = 1;
-      sf->rt_sf.rtc_use_lt_ref = 0;
       // For screen content with --enable-intrabc-ext, selectively enable
       // pruned IntraBC evaluation on high-SAD delta frames (scene/slide
       // changes) when scene detection is active, or on all delta frames when
@@ -1112,6 +1095,22 @@ static void set_rt_speed_features_framesize_independent(
     }
     if (can_enable_cbr_bru(cpi, speed)) {
       sf->rt_sf.rtc_enable_bru = 1;
+    }
+  }
+}
+
+static void set_rt_speed_features_framesize_dependent(
+    AV2_COMP *const cpi, SPEED_FEATURES *const sf, int speed) {
+  const AV2_COMMON *const cm = &cpi->common;
+  if (speed >= 6) {
+    if (cm->width * cm->height < 640 * 360) {
+      sf->rd_sf.tx_domain_dist_thres_level = 2;
+    }
+    if (cm->width * cm->height <= 320 * 240 && !cpi->is_screen_content_type &&
+        cpi->oxcf.tune_cfg.content != AVM_CONTENT_SCREEN) {
+      sf->rd_sf.tx_domain_dist_thres_level = 1;
+      sf->tx_sf.prune_tx_part_stationarity = false;
+      sf->mv_sf.subpel_iters_per_step = 2;
     }
   }
 }
@@ -1605,6 +1604,78 @@ static AVM_INLINE void set_erp_speed_features_framesize_dependent(
   }
 }
 
+// Set the subpel search function and the winner mode parameters from the
+// speed features.
+static void set_speed_feature_params(AV2_COMP *cpi) {
+  WinnerModeParams *const winner_mode_params = &cpi->winner_mode_params;
+  const SPEED_FEATURES *const sf = &cpi->sf;
+  MotionVectorSearchParams *const mv_search_params = &cpi->mv_search_params;
+  if (sf->mv_sf.subpel_search_method == SUBPEL_TREE) {
+    mv_search_params->find_fractional_mv_step = av2_find_best_sub_pixel_tree;
+  } else if (sf->mv_sf.subpel_search_method == SUBPEL_TREE_PRUNED) {
+    mv_search_params->find_fractional_mv_step =
+        av2_find_best_sub_pixel_tree_pruned;
+  } else if (sf->mv_sf.subpel_search_method == SUBPEL_TREE_PRUNED_MORE) {
+    mv_search_params->find_fractional_mv_step =
+        av2_find_best_sub_pixel_tree_pruned_more;
+  } else if (sf->mv_sf.subpel_search_method == SUBPEL_TREE_PRUNED_EVENMORE) {
+    mv_search_params->find_fractional_mv_step =
+        av2_find_best_sub_pixel_tree_pruned_evenmore;
+  }
+
+  // This is only used in motion vector unit test.
+  if (cpi->oxcf.unit_test_cfg.motion_vector_unit_test == 1)
+    mv_search_params->find_fractional_mv_step = av2_return_max_sub_pixel_mv;
+  else if (cpi->oxcf.unit_test_cfg.motion_vector_unit_test == 2)
+    mv_search_params->find_fractional_mv_step = av2_return_min_sub_pixel_mv;
+
+  // assert ensures that tx_domain_dist_level is accessed correctly
+  assert(cpi->sf.rd_sf.tx_domain_dist_thres_level >= 0 &&
+         cpi->sf.rd_sf.tx_domain_dist_thres_level < 3);
+  memcpy(winner_mode_params->tx_domain_dist_threshold,
+         tx_domain_dist_thresholds[cpi->sf.rd_sf.tx_domain_dist_thres_level],
+         sizeof(winner_mode_params->tx_domain_dist_threshold));
+
+  assert(cpi->sf.rd_sf.tx_domain_dist_level >= 0 &&
+         cpi->sf.rd_sf.tx_domain_dist_level < 3);
+  memcpy(winner_mode_params->use_transform_domain_distortion,
+         tx_domain_dist_types[cpi->sf.rd_sf.tx_domain_dist_level],
+         sizeof(winner_mode_params->use_transform_domain_distortion));
+
+  // assert ensures that coeff_opt_dist_thresholds is accessed correctly
+  assert(cpi->sf.rd_sf.perform_coeff_opt >= 0 &&
+         cpi->sf.rd_sf.perform_coeff_opt < 7);
+  memcpy(winner_mode_params->coeff_opt_dist_threshold,
+         coeff_opt_dist_thresholds[cpi->sf.rd_sf.perform_coeff_opt],
+         sizeof(winner_mode_params->coeff_opt_dist_threshold));
+
+  // assert ensures that coeff_opt_satd_thresholds is accessed correctly
+  assert(cpi->sf.rd_sf.perform_coeff_opt_based_on_satd >= 0 &&
+         cpi->sf.rd_sf.perform_coeff_opt_based_on_satd < 3);
+  memcpy(
+      winner_mode_params->coeff_opt_satd_threshold,
+      coeff_opt_satd_thresholds[cpi->sf.rd_sf.perform_coeff_opt_based_on_satd],
+      sizeof(winner_mode_params->coeff_opt_satd_threshold));
+
+  // assert ensures that predict_skip_levels is accessed correctly
+  assert(cpi->sf.tx_sf.tx_type_search.use_skip_flag_prediction >= 0 &&
+         cpi->sf.tx_sf.tx_type_search.use_skip_flag_prediction < 3);
+  memcpy(winner_mode_params->skip_txfm_level,
+         predict_skip_levels[cpi->sf.tx_sf.tx_type_search
+                                 .use_skip_flag_prediction],
+         sizeof(winner_mode_params->skip_txfm_level));
+
+  // assert ensures that tx_size_search_level is accessed correctly
+  assert(cpi->sf.winner_mode_sf.tx_size_search_level >= 0 &&
+         cpi->sf.winner_mode_sf.tx_size_search_level < 3);
+  memcpy(winner_mode_params->tx_size_search_methods,
+         tx_size_search_methods[cpi->sf.winner_mode_sf.tx_size_search_level],
+         sizeof(winner_mode_params->tx_size_search_methods));
+  memcpy(winner_mode_params->predict_dc_level,
+         predict_dc_levels[cpi->sf.winner_mode_sf.dc_blk_pred_level],
+         sizeof(winner_mode_params->predict_dc_level));
+}
+
 void av2_set_speed_features_framesize_dependent(AV2_COMP *cpi, int speed) {
   SPEED_FEATURES *const sf = &cpi->sf;
   const AV2EncoderConfig *const oxcf = &cpi->oxcf;
@@ -1614,14 +1685,10 @@ void av2_set_speed_features_framesize_dependent(AV2_COMP *cpi, int speed) {
   if (oxcf->mode == GOOD) {
     set_good_speed_feature_framesize_dependent(cpi, sf, speed);
   } else if (oxcf->mode == REALTIME) {
-    set_rt_speed_feature_framesize_dependent(cpi, sf, speed);
+    set_rt_speed_features_framesize_dependent(cpi, sf, speed);
   }
 
-  // This is only used in motion vector unit test.
-  if (cpi->oxcf.unit_test_cfg.motion_vector_unit_test == 1)
-    cpi->mv_search_params.find_fractional_mv_step = av2_return_max_sub_pixel_mv;
-  else if (cpi->oxcf.unit_test_cfg.motion_vector_unit_test == 2)
-    cpi->mv_search_params.find_fractional_mv_step = av2_return_min_sub_pixel_mv;
+  set_speed_feature_params(cpi);
 
   if (oxcf->part_cfg.disable_ml_partition_speed_features)
     av2_disable_ml_based_partition_sf(&sf->part_sf);
@@ -1771,78 +1838,6 @@ static void set_mesh_patterns(SPEED_FEATURES *sf, int speed) {
     sf->mv_sf.intrabc_mesh_patterns[i].interval =
         intrabc_mesh_patterns[mesh_speed][i].interval;
   }
-}
-
-// Set the subpel search function and the winner mode parameters from the
-// speed features.
-static void set_speed_feature_params(AV2_COMP *cpi) {
-  WinnerModeParams *const winner_mode_params = &cpi->winner_mode_params;
-  const SPEED_FEATURES *const sf = &cpi->sf;
-  MotionVectorSearchParams *const mv_search_params = &cpi->mv_search_params;
-  if (sf->mv_sf.subpel_search_method == SUBPEL_TREE) {
-    mv_search_params->find_fractional_mv_step = av2_find_best_sub_pixel_tree;
-  } else if (sf->mv_sf.subpel_search_method == SUBPEL_TREE_PRUNED) {
-    mv_search_params->find_fractional_mv_step =
-        av2_find_best_sub_pixel_tree_pruned;
-  } else if (sf->mv_sf.subpel_search_method == SUBPEL_TREE_PRUNED_MORE) {
-    mv_search_params->find_fractional_mv_step =
-        av2_find_best_sub_pixel_tree_pruned_more;
-  } else if (sf->mv_sf.subpel_search_method == SUBPEL_TREE_PRUNED_EVENMORE) {
-    mv_search_params->find_fractional_mv_step =
-        av2_find_best_sub_pixel_tree_pruned_evenmore;
-  }
-
-  // This is only used in motion vector unit test.
-  if (cpi->oxcf.unit_test_cfg.motion_vector_unit_test == 1)
-    mv_search_params->find_fractional_mv_step = av2_return_max_sub_pixel_mv;
-  else if (cpi->oxcf.unit_test_cfg.motion_vector_unit_test == 2)
-    mv_search_params->find_fractional_mv_step = av2_return_min_sub_pixel_mv;
-
-  // assert ensures that tx_domain_dist_level is accessed correctly
-  assert(cpi->sf.rd_sf.tx_domain_dist_thres_level >= 0 &&
-         cpi->sf.rd_sf.tx_domain_dist_thres_level < 3);
-  memcpy(winner_mode_params->tx_domain_dist_threshold,
-         tx_domain_dist_thresholds[cpi->sf.rd_sf.tx_domain_dist_thres_level],
-         sizeof(winner_mode_params->tx_domain_dist_threshold));
-
-  assert(cpi->sf.rd_sf.tx_domain_dist_level >= 0 &&
-         cpi->sf.rd_sf.tx_domain_dist_level < 3);
-  memcpy(winner_mode_params->use_transform_domain_distortion,
-         tx_domain_dist_types[cpi->sf.rd_sf.tx_domain_dist_level],
-         sizeof(winner_mode_params->use_transform_domain_distortion));
-
-  // assert ensures that coeff_opt_dist_thresholds is accessed correctly
-  assert(cpi->sf.rd_sf.perform_coeff_opt >= 0 &&
-         cpi->sf.rd_sf.perform_coeff_opt < 7);
-  memcpy(winner_mode_params->coeff_opt_dist_threshold,
-         coeff_opt_dist_thresholds[cpi->sf.rd_sf.perform_coeff_opt],
-         sizeof(winner_mode_params->coeff_opt_dist_threshold));
-
-  // assert ensures that coeff_opt_satd_thresholds is accessed correctly
-  assert(cpi->sf.rd_sf.perform_coeff_opt_based_on_satd >= 0 &&
-         cpi->sf.rd_sf.perform_coeff_opt_based_on_satd < 3);
-  memcpy(
-      winner_mode_params->coeff_opt_satd_threshold,
-      coeff_opt_satd_thresholds[cpi->sf.rd_sf.perform_coeff_opt_based_on_satd],
-      sizeof(winner_mode_params->coeff_opt_satd_threshold));
-
-  // assert ensures that predict_skip_levels is accessed correctly
-  assert(cpi->sf.tx_sf.tx_type_search.use_skip_flag_prediction >= 0 &&
-         cpi->sf.tx_sf.tx_type_search.use_skip_flag_prediction < 3);
-  memcpy(winner_mode_params->skip_txfm_level,
-         predict_skip_levels[cpi->sf.tx_sf.tx_type_search
-                                 .use_skip_flag_prediction],
-         sizeof(winner_mode_params->skip_txfm_level));
-
-  // assert ensures that tx_size_search_level is accessed correctly
-  assert(cpi->sf.winner_mode_sf.tx_size_search_level >= 0 &&
-         cpi->sf.winner_mode_sf.tx_size_search_level < 3);
-  memcpy(winner_mode_params->tx_size_search_methods,
-         tx_size_search_methods[cpi->sf.winner_mode_sf.tx_size_search_level],
-         sizeof(winner_mode_params->tx_size_search_methods));
-  memcpy(winner_mode_params->predict_dc_level,
-         predict_dc_levels[cpi->sf.winner_mode_sf.dc_blk_pred_level],
-         sizeof(winner_mode_params->predict_dc_level));
 }
 
 void av2_set_speed_features_framesize_independent(AV2_COMP *cpi, int speed) {
