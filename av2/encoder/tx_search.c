@@ -1547,7 +1547,8 @@ static AVM_INLINE uint16_t get_tx_mask(const AV2_COMP *cpi, MACROBLOCK *x,
        txsize_sqr_map[tx_size] == TX_32X32) ||
       ext_tx_used_flag == 0x0001 ||
       (is_inter && cpi->oxcf.txfm_cfg.use_inter_dct_only) ||
-      (!is_inter && cpi->oxcf.txfm_cfg.use_intra_dct_only)) {
+      (!is_inter && (cpi->oxcf.txfm_cfg.use_intra_dct_only ||
+                     cpi->sf.tx_sf.tx_type_search.use_intra_dct_only))) {
     txk_allowed = DCT_DCT;
   }
 
@@ -3448,7 +3449,12 @@ static void select_tx_partition_type(
       continue;
     }
 
-    if (cpi->sf.tx_sf.prune_tx_part_stationarity && type != TX_PARTITION_NONE) {
+    const bool bypass_rt_tx_stat =
+        cpi->oxcf.mode == REALTIME && cpi->speed >= 6 &&
+        !cpi->is_screen_content_type && !frame_is_intra_only(&cpi->common) &&
+        x->source_sad_level >= kLowSad;
+    if (cpi->sf.tx_sf.prune_tx_part_stationarity && !bypass_rt_tx_stat &&
+        type != TX_PARTITION_NONE) {
       if (!stationarity_valid) {
         const int margin = (cpi->oxcf.mode == GOOD && cpi->oxcf.speed >= 5)
                                ? 1

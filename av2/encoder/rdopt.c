@@ -10588,11 +10588,41 @@ void av2_rd_pick_inter_mode_sb(struct AV2_COMP *cpi,
       if (inter_sf->skip_amvd_new_near_near_new_modes && amvd_inverted &&
           mbmi->use_amvd && cm->current_frame.pyramid_level > 3)
         continue;
-      if (inter_sf->prune_amvd_newmv && cm->current_frame.pyramid_level >= 4 &&
+      // On stationary >= 64x64 non-screen RT blocks where a zero-MVD candidate
+      // is already skippable, skip full-pel + sub-pel NEWMV search.
+      if (cpi->oxcf.mode == REALTIME && cpi->speed >= 6 &&
+          !cpi->is_screen_content_type && cm->width * cm->height >= 640 * 360 &&
+          this_mode == NEWMV && bsize >= BLOCK_64X64 &&
+          x->source_sad_level <= kVeryLowSad &&
+          search_state.best_mode_skippable) {
+        continue;
+      }
+      if (inter_sf->prune_amvd_newmv &&
+          (cm->current_frame.pyramid_level >= 4 ||
+           (cpi->oxcf.mode == REALTIME && !cpi->is_screen_content_type)) &&
           (mbmi->mode == NEWMV || mbmi->mode == NEW_NEWMV ||
            mbmi->mode == NEW_NEWMV_OPTFLOW)) {
         if (mbmi->use_amvd && search_state.best_mbmode.mode != mbmi->mode) {
           continue;
+        }
+        if (mbmi->use_amvd && cpi->oxcf.mode == REALTIME && cpi->speed >= 6 &&
+            !cpi->is_screen_content_type) {
+          if (search_state.best_mode_skippable || ref_frame > 0) {
+            continue;
+          }
+          if (!comp_pred && mbmi->mode == NEWMV) {
+            const MvSubpelPrecision max_prec = mbmi->max_mv_precision;
+            if (!args.single_newmv_valid[max_prec][0][ref_frame_index])
+              continue;
+            const MV mv0 =
+                args.single_newmv[max_prec][0][ref_frame_index].as_mv;
+            const MV rmv = av2_get_ref_mv_from_stack(0, mbmi->ref_frame, 0,
+                                                     x->mbmi_ext, mbmi)
+                               .as_mv;
+            const int drow = abs(mv0.row - rmv.row);
+            const int dcol = abs(mv0.col - rmv.col);
+            if ((drow < 4 && dcol < 4) || (drow > 4 && dcol > 4)) continue;
+          }
         }
       }
 

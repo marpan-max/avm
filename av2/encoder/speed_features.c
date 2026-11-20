@@ -1211,6 +1211,8 @@ static void set_rt_speed_features_framesize_independent(
   // Set this good features as default for now.
   set_good_speed_features_framesize_independent(cpi, sf, speed);
   sf->part_sf.intra_two_pass_partition_search = TWO_PASS_PART_OFF;
+  sf->inter_sf.disable_adaptive_mvd = 1;
+  sf->tx_sf.tx_type_search.use_intra_dct_only = 1;
   if (speed >= 6) {
     sf->inter_sf.prune_ref_frames = 3;
     sf->intra_sf.intra_pruning_with_mlp = 0;
@@ -1283,8 +1285,12 @@ static void set_rt_speed_features_framesize_dependent(AV2_COMP *const cpi,
     sf->mv_sf.subpel_iters_per_step = 1;
     sf->mv_sf.newmv_drl_search_limit = 1;
     sf->mv_sf.subpel_search_method = SUBPEL_TREE_PRUNED_MORE;
+    const uint64_t frame_sad = cpi->rc.frame_source_sad;
+    sf->inter_sf.disable_adaptive_mvd = 1;
+    sf->tx_sf.tx_type_search.use_intra_dct_only = 1;
+    sf->tx_sf.tx_type_search.prune_tx_type_using_stats = 0;
+    sf->inter_sf.prune_ref_mv_idx_search = 0;
     if (cm->width * cm->height < 640 * 360) {
-      const uint64_t frame_sad = cpi->rc.frame_source_sad;
       if (cpi->oxcf.algo_cfg.enable_trellis_quant &&
           cpi->oxcf.q_cfg.aq_mode == NO_AQ &&
           !is_lossless_requested(&cpi->oxcf.rc_cfg)) {
@@ -1297,6 +1303,25 @@ static void set_rt_speed_features_framesize_dependent(AV2_COMP *const cpi,
         if (frame_sad >= 15000) {
           sf->mv_sf.subpel_search_method = SUBPEL_TREE;
         }
+      }
+    } else if (!cpi->is_screen_content_type) {
+      sf->inter_sf.disable_adaptive_mvd = 0;
+      sf->inter_sf.prune_amvd = true;
+      sf->inter_sf.prune_amvd_newmv = 2;
+      sf->tx_sf.tx_type_search.use_intra_dct_only =
+          frame_is_intra_only(cm) ? 0 : 1;
+      if (AVMMIN(cm->width, cm->height) >= 360) {
+        sf->tx_sf.tx_type_search.prune_tx_type_using_stats = 1;
+        sf->inter_sf.prune_ref_mv_idx_search = 2;
+      }
+      if (cpi->oxcf.algo_cfg.enable_trellis_quant &&
+          !is_lossless_requested(&cpi->oxcf.rc_cfg)) {
+        sf->rd_sf.optimize_coefficients = FINAL_PASS_TRELLIS_OPT;
+      }
+      if (frame_sad >= 15000) {
+        sf->mv_sf.subpel_iters_per_step = 2;
+        sf->mv_sf.newmv_drl_search_limit = 2;
+        sf->mv_sf.subpel_search_method = SUBPEL_TREE;
       }
     }
     set_speed_feature_params(cpi);
@@ -1525,6 +1550,7 @@ static AVM_INLINE void init_inter_sf(INTER_MODE_SPEED_FEATURES *inter_sf) {
   inter_sf->limit_single_ref_mv_idx = 0;
   inter_sf->skip_amvd_search_in_dry_pass = false;
   inter_sf->inter_cand_gate_level = 0;
+  inter_sf->disable_adaptive_mvd = 0;
 }
 
 static AVM_INLINE void init_interp_sf(INTERP_FILTER_SPEED_FEATURES *interp_sf) {
@@ -1562,6 +1588,7 @@ static AVM_INLINE void init_tx_sf(TX_SPEED_FEATURES *tx_sf) {
   tx_sf->tx_type_search.skip_tx_search_max_eob = 1024;
   tx_sf->tx_type_search.disable_inter_ist = false;
   tx_sf->tx_type_search.prune_tx_type_using_stats = 0;
+  tx_sf->tx_type_search.use_intra_dct_only = 0;
   tx_sf->tx_type_search.winner_mode_tx_type_pruning = 0;
   tx_sf->txb_split_cap = 1;
   tx_sf->skip_pixel_dist_calc_using_tx_dist = false;
@@ -1812,6 +1839,10 @@ void av2_set_speed_features_framesize_dependent(AV2_COMP *cpi, int speed) {
     cpi->common.seq_params.enable_uneven_4way_partitions =
         oxcf->part_cfg.enable_uneven_4way_partitions &&
         !sf->part_sf.disable_uneven_4way_partitions;
+    cpi->common.seq_params.enable_adaptive_mvd =
+        !cpi->common.seq_params.single_picture_header_flag &&
+        oxcf->tool_cfg.enable_adaptive_mvd &&
+        !sf->inter_sf.disable_adaptive_mvd;
     cpi->common.seq_params.enable_masked_compound &=
         !sf->inter_sf.disable_masked_comp;
   }
@@ -2291,6 +2322,13 @@ static AVM_INLINE void set_inter_frame_speed_features(AV2_COMP *cpi,
                                                       int speed) {
   const AV2_COMMON *const cm = &cpi->common;
   SPEED_FEATURES *const sf = &cpi->sf;
+  if (cpi->oxcf.mode == REALTIME && speed >= 6 &&
+      !cpi->is_screen_content_type && cm->width * cm->height >= 640 * 360 &&
+      !frame_is_intra_only(cm)) {
+    sf->inter_sf.adaptive_rd_thresh = 4;
+    sf->inter_sf.full_pool_inter_mode_prune_top = 6;
+    return;
+  }
   if (cpi->oxcf.mode != GOOD || speed != 6 || frame_is_intra_only(cm)) return;
 
   // Let the adaptive RD thresholds grow to 4 times the level-1 cap, and give
@@ -2640,7 +2678,10 @@ void av2_set_speed_features_qindex_dependent(AV2_COMP *cpi, int speed) {
 
   // Speed 1 and fine quantizers only; assigned, not cleared, because this
   // function runs per frame while the framesize-independent pass does not.
-  sf->tx_sf.use_tx_result_cache = cpi->oxcf.mode == GOOD && speed >= 1;
+  sf->tx_sf.use_tx_result_cache =
+      (cpi->oxcf.mode == GOOD && speed >= 1) ||
+      (cpi->oxcf.mode == REALTIME && speed >= 6 &&
+       !cpi->is_screen_content_type && cm->width * cm->height >= 640 * 360);
 
   if (cpi->oxcf.mode == GOOD && speed >= 3) {
     sf->part_sf.disable_ext_partitions =
@@ -2772,7 +2813,10 @@ void av2_set_speed_features_qindex_dependent(AV2_COMP *cpi, int speed) {
   if (((speed == 2 || (cpi->oxcf.mode == GOOD && speed == 3)) &&
        sf->winner_mode_sf.dc_blk_pred_level == 0) ||
       speed == 4 ||
-      (cpi->oxcf.mode == GOOD && speed == 6 && is_720p_or_larger)) {
+      (((cpi->oxcf.mode == GOOD && speed == 6) ||
+        (cpi->oxcf.mode == REALTIME && speed >= 6 &&
+         !cpi->is_screen_content_type)) &&
+       is_720p_or_larger)) {
     const int dc_blk_pred_qmin = 113 + qindex_offset;
     if (cm->quant_params.base_qindex > dc_blk_pred_qmin) {
       sf->winner_mode_sf.dc_blk_pred_level = 3;

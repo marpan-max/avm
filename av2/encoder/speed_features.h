@@ -153,6 +153,9 @@ typedef struct {
   // Prune tx type search using previous frame stats.
   int prune_tx_type_using_stats;
 
+  // Restrict intra transform search to DCT_DCT.
+  int use_intra_dct_only;
+
   // Flag used to control the winner mode processing for tx type pruning for
   // inter blocks. It enables further tx type mode pruning based on ML model for
   // mode evaluation and disables tx type mode pruning for winner mode
@@ -1166,6 +1169,9 @@ typedef struct INTER_MODE_SPEED_FEATURES {
   // 1: never skips single-reference NEWMV.
   // 2, 3: thresholds from low to high (more candidates skipped).
   int inter_cand_gate_level;
+
+  // Disable adaptive MVD resolution (AMVD) for sequence.
+  int disable_adaptive_mvd;
 } INTER_MODE_SPEED_FEATURES;
 
 typedef struct INTERP_FILTER_SPEED_FEATURES {
