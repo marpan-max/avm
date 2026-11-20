@@ -1212,6 +1212,9 @@ static void set_rt_speed_features_framesize_independent(
   set_good_speed_features_framesize_independent(cpi, sf, speed);
   sf->part_sf.intra_two_pass_partition_search = TWO_PASS_PART_OFF;
   if (speed >= 6) {
+    if (sf->inter_sf.prune_drl_candidates) {
+      sf->inter_sf.prune_drl_candidates = 2;
+    }
     sf->inter_sf.prune_ref_frames = 3;
     sf->intra_sf.intra_pruning_with_mlp = 0;
     sf->intra_sf.prune_palette_search_level = 2;

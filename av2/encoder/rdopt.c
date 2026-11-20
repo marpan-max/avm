@@ -4330,23 +4330,41 @@ static int ref_mv_idx_to_search(AV2_COMP *const cpi, MACROBLOCK *x,
     }
   }
 
-  // Keep the candidate with the lowest valid translation RD cost.
+  // Keep the candidate with the lowest valid translation RD cost (and for
+  // REALTIME NEARMV on the primary reference, also keep the runner-up when its
+  // RD cost is close to the best).
   if (prune_drl) {
     if (result == 0) return 0;
     int scored_idx = -1;
+    int second_idx = -1;
     int64_t best_scored = INT64_MAX;
+    int64_t second_scored = INT64_MAX;
     for (ref_mv_idx[1] = 0; ref_mv_idx[1] < ref_set[1]; ++ref_mv_idx[1]) {
       for (ref_mv_idx[0] = 0; ref_mv_idx[0] < ref_set[0]; ++ref_mv_idx[0]) {
         const int j = av2_ref_mv_idx_type(mbmi, ref_mv_idx);
         if (!mask_check_bit(result, j)) continue;
         if (idx_rdcost[j] == INT64_MAX) continue;
         if (idx_rdcost[j] < best_scored) {
+          second_scored = best_scored;
+          second_idx = scored_idx;
           best_scored = idx_rdcost[j];
           scored_idx = j;
+        } else if (idx_rdcost[j] < second_scored) {
+          second_scored = idx_rdcost[j];
+          second_idx = j;
         }
       }
     }
-    if (scored_idx >= 0) return 1 << scored_idx;
+    if (scored_idx >= 0) {
+      int mask = 1 << scored_idx;
+      if (prune_drl == 2 && mbmi->ref_frame[0] == 0 && second_idx >= 0) {
+        const int shift = num_pels_log2_lookup[bsize] >= 12 ? 3 : 2;
+        if (second_scored <= best_scored + (best_scored >> shift)) {
+          mask |= (1 << second_idx);
+        }
+      }
+      return mask;
+    }
     return mask_lowest_bit(result);
   }
 
