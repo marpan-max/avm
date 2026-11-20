@@ -993,8 +993,13 @@ static int calc_active_worst_quality_no_stats_cbr(const AV2_COMP *cpi) {
       active_worst_quality = AVMMIN(rc->worst_quality, ambient_qp);
       max_adjustment_down = AVMMIN(4, active_worst_quality / 16);
     } else {
-      active_worst_quality = AVMMIN(rc->worst_quality, ambient_qp * 5 / 4);
-      max_adjustment_down = active_worst_quality / 3;
+      if (cpi->oxcf.mode == REALTIME && !cpi->is_screen_content_type) {
+        active_worst_quality = AVMMIN(rc->worst_quality, ambient_qp + 8);
+        max_adjustment_down = AVMMIN(24, active_worst_quality / 3);
+      } else {
+        active_worst_quality = AVMMIN(rc->worst_quality, ambient_qp * 5 / 4);
+        max_adjustment_down = active_worst_quality / 3;
+      }
     }
     if (max_adjustment_down) {
       buff_lvl_step = ((rc->maximum_buffer_size - rc->optimal_buffer_level) /
@@ -1089,10 +1094,13 @@ static int calc_active_best_quality_no_stats_cbr(const AV2_COMP *cpi,
     // Use the lower of active_worst_quality and recent/average Q.
     FRAME_TYPE frame_type =
         (current_frame->frame_number > 1) ? INTER_FRAME : KEY_FRAME;
-    if (rc->avg_frame_qindex[frame_type] < active_worst_quality)
-      active_best_quality = rtc_minq[rc->avg_frame_qindex[frame_type]];
-    else
-      active_best_quality = rtc_minq[active_worst_quality];
+    const int q_ref =
+        AVMMIN(rc->avg_frame_qindex[frame_type], active_worst_quality);
+    active_best_quality = rtc_minq[q_ref];
+    if (cpi->oxcf.mode == REALTIME && !cpi->is_screen_content_type) {
+      active_best_quality =
+          AVMMIN(active_best_quality, AVMMAX(rc->best_quality, q_ref - 12));
+    }
   }
   if (rc->buffer_level > rc->optimal_buffer_level) {
     int max_adjustment_down = (active_best_quality - rc->best_quality) / 2;

@@ -1285,8 +1285,8 @@ static void set_rt_speed_features_framesize_dependent(AV2_COMP *const cpi,
     sf->mv_sf.subpel_search_method = SUBPEL_TREE_PRUNED_MORE;
     if (cm->width * cm->height < 640 * 360) {
       const uint64_t frame_sad = cpi->rc.frame_source_sad;
-      if (cpi->oxcf.algo_cfg.enable_trellis_quant &&
-          cpi->oxcf.q_cfg.aq_mode == NO_AQ &&
+      if (!cpi->is_screen_content_type &&
+          cpi->oxcf.algo_cfg.enable_trellis_quant &&
           !is_lossless_requested(&cpi->oxcf.rc_cfg)) {
         sf->rd_sf.optimize_coefficients = FINAL_PASS_TRELLIS_OPT;
       }

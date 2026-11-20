@@ -1403,7 +1403,7 @@ void av2_choose_var_based_partitioning(AV2_COMP *cpi,
                                 blk64_idx, lvl1_idx);
         } else if (!is_key_frame && !is_screen) {
           const bool lowres_nonscreen =
-              is_lowres && !cpi->is_screen_content_type;
+              is_360p_or_smaller && !cpi->is_screen_content_type;
           const int maxvar_thresh_shift = lowres_nonscreen ? 2 : 4;
           const int minvar_scale_shift = lowres_nonscreen ? 3 : 2;
           if ((max_min_var_16X16_diff > (thresholds[3] >> 1) &&
