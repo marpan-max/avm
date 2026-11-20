@@ -50,6 +50,20 @@ static void crc_calculator_init_table(CRC_CALCULATOR *p_crc_calculator) {
       }
     }
     p_crc_calculator->table[value] = remainder;
+    p_crc_calculator->table8[0][value] =
+        remainder & p_crc_calculator->final_result_mask;
+  }
+  if (p_crc_calculator->bits == 24) {
+    const uint32_t mask = p_crc_calculator->final_result_mask;
+    for (int k = 1; k < 8; k++) {
+      for (uint32_t value = 0; value < 256; value++) {
+        const uint32_t r = p_crc_calculator->table8[k - 1][value];
+        p_crc_calculator->table8[k][value] =
+            (((r << 8) & mask) ^
+             p_crc_calculator->table8[0][(r >> 16) & 0xFFu]) &
+            mask;
+      }
+    }
   }
 }
 

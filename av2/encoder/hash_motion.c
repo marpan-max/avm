@@ -11,9 +11,12 @@
  */
 
 #include <assert.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "config/av2_rtcd.h"
 
+#include "avm_ports/mem.h"
 #include "av2/encoder/block.h"
 #include "av2/encoder/hash.h"
 #include "av2/encoder/hash_motion.h"
@@ -104,20 +107,31 @@ void av2_hash_table_create(hash_table *p_hash_table) {
          sizeof(p_hash_table->p_lookup_table[0]) * kMaxAddr);
 }
 
-static void hash_table_add_to_table(hash_table *p_hash_table,
-                                    uint32_t hash_value,
-                                    block_hash *curr_block_hash) {
-  if (p_hash_table->p_lookup_table[hash_value] == NULL) {
-    p_hash_table->p_lookup_table[hash_value] =
-        avm_malloc(sizeof(p_hash_table->p_lookup_table[0][0]));
-    avm_vector_setup(p_hash_table->p_lookup_table[hash_value], 10,
-                     sizeof(curr_block_hash[0]));
-    avm_vector_push_back(p_hash_table->p_lookup_table[hash_value],
-                         curr_block_hash);
-  } else {
-    avm_vector_push_back(p_hash_table->p_lookup_table[hash_value],
-                         curr_block_hash);
+static AVM_INLINE void hash_table_add_to_table(hash_table *p_hash_table,
+                                               uint32_t hash_value,
+                                               const block_hash *curr_hash) {
+  Vector *vec = p_hash_table->p_lookup_table[hash_value];
+  if (vec == NULL) {
+    vec = avm_malloc(sizeof(*vec));
+    avm_vector_setup(vec, 10, sizeof(*curr_hash));
+    p_hash_table->p_lookup_table[hash_value] = vec;
   }
+  if (vec->size < vec->capacity) {
+    ((block_hash *)vec->data)[vec->size++] = *curr_hash;
+  } else {
+    block_hash tmp = *curr_hash;
+    avm_vector_push_back(vec, &tmp);
+  }
+}
+
+static AVM_INLINE uint32_t block_hash_xy_key(const block_hash *h) {
+  return ((uint32_t)(uint16_t)h->x << 16) | (uint16_t)h->y;
+}
+
+static int compare_block_hash_xy(const void *a, const void *b) {
+  const uint32_t ka = block_hash_xy_key((const block_hash *)a);
+  const uint32_t kb = block_hash_xy_key((const block_hash *)b);
+  return (ka > kb) - (ka < kb);
 }
 
 int32_t av2_hash_table_count(const hash_table *p_hash_table,
@@ -146,8 +160,7 @@ void av2_generate_block_2x2_hash_value(IntraBCHashInfo *intrabc_hash_info,
   CRC_CALCULATOR *calc_1 = &intrabc_hash_info->crc_calculator1;
   CRC_CALCULATOR *calc_2 = &intrabc_hash_info->crc_calculator2;
 
-  const int length = width * 2;
-  uint16_t p[4];
+  DECLARE_ALIGNED(8, uint16_t, p[4]);
   int pos = 0;
   for (int y_pos = 0; y_pos < y_end; y_pos++) {
     for (int x_pos = 0; x_pos < x_end; x_pos++) {
@@ -157,10 +170,8 @@ void av2_generate_block_2x2_hash_value(IntraBCHashInfo *intrabc_hash_info,
       pic_block_same_info[0][pos] = is_block16_2x2_row_same_value(p);
       pic_block_same_info[1][pos] = is_block16_2x2_col_same_value(p);
 
-      pic_block_hash[0][pos] =
-          av2_get_crc_value(calc_1, (uint8_t *)p, length * sizeof(p[0]));
-      pic_block_hash[1][pos] =
-          av2_get_crc_value(calc_2, (uint8_t *)p, length * sizeof(p[0]));
+      pic_block_hash[0][pos] = av2_get_crc24_8bytes(calc_1, p);
+      pic_block_hash[1][pos] = av2_get_crc24_8bytes(calc_2, p);
       pos++;
     }
     pos += width - 1;
@@ -184,8 +195,7 @@ void av2_generate_block_hash_value(IntraBCHashInfo *intrabc_hash_info,
   const int src_size = block_size >> 1;
   const int quad_size = block_size >> 2;
 
-  uint32_t p[4];
-  const int length = sizeof(p);
+  DECLARE_ALIGNED(8, uint32_t, p[4]);
 
   int pos = 0;
   for (int y_pos = 0; y_pos < y_end; y_pos++) {
@@ -194,15 +204,13 @@ void av2_generate_block_hash_value(IntraBCHashInfo *intrabc_hash_info,
       p[1] = src_pic_block_hash[0][pos + src_size];
       p[2] = src_pic_block_hash[0][pos + src_size * pic_width];
       p[3] = src_pic_block_hash[0][pos + src_size * pic_width + src_size];
-      dst_pic_block_hash[0][pos] =
-          av2_get_crc_value(calc_1, (uint8_t *)p, length);
+      dst_pic_block_hash[0][pos] = av2_get_crc24_16bytes(calc_1, p);
 
       p[0] = src_pic_block_hash[1][pos];
       p[1] = src_pic_block_hash[1][pos + src_size];
       p[2] = src_pic_block_hash[1][pos + src_size * pic_width];
       p[3] = src_pic_block_hash[1][pos + src_size * pic_width + src_size];
-      dst_pic_block_hash[1][pos] =
-          av2_get_crc_value(calc_2, (uint8_t *)p, length);
+      dst_pic_block_hash[1][pos] = av2_get_crc24_16bytes(calc_2, p);
 
       dst_pic_block_same_info[0][pos] =
           src_pic_block_same_info[0][pos] &&
@@ -256,10 +264,13 @@ void av2_add_to_hash_map_by_row_with_precal_data(hash_table *p_hash_table,
   add_value <<= kSrcBits;
   const int crc_mask = (1 << kSrcBits) - 1;
 
-  for (int x_pos = 0; x_pos < x_end; x_pos++) {
-    for (int y_pos = 0; y_pos < y_end; y_pos++) {
-      const int pos = y_pos * pic_width + x_pos;
-      // valid data
+  // Scan row-major for sequential L1 cache access, then restore exact (x, y)
+  // bucket order within this block_size's disjoint [add_value, add_value +
+  // 2^kSrcBits) slice so hash lookups remain 100% bit-identical.
+  for (int y_pos = 0; y_pos < y_end; y_pos++) {
+    const int row_offset = y_pos * pic_width;
+    for (int x_pos = 0; x_pos < x_end; x_pos++) {
+      const int pos = row_offset + x_pos;
       if (src_is_added[pos]) {
         block_hash curr_block_hash;
         curr_block_hash.x = x_pos;
@@ -270,6 +281,28 @@ void av2_add_to_hash_map_by_row_with_precal_data(hash_table *p_hash_table,
 
         hash_table_add_to_table(p_hash_table, hash_value1, &curr_block_hash);
       }
+    }
+  }
+
+  const int bucket_end = add_value + (1 << kSrcBits);
+  for (int bucket = add_value; bucket < bucket_end; bucket++) {
+    Vector *vec = p_hash_table->p_lookup_table[bucket];
+    if (vec == NULL || vec->size <= 1) continue;
+    block_hash *arr = (block_hash *)vec->data;
+    const size_t n = vec->size;
+    if (n <= 16) {
+      for (size_t i = 1; i < n; i++) {
+        const block_hash cur = arr[i];
+        const uint32_t cur_key = block_hash_xy_key(&cur);
+        size_t j = i;
+        while (j > 0 && block_hash_xy_key(&arr[j - 1]) > cur_key) {
+          arr[j] = arr[j - 1];
+          j--;
+        }
+        arr[j] = cur;
+      }
+    } else {
+      qsort(arr, n, sizeof(*arr), compare_block_hash_xy);
     }
   }
 }
@@ -321,17 +354,15 @@ void av2_get_block_hash_value(IntraBCHashInfo *intrabc_hash_info,
 
   // 2x2 subblock hash values in current CU
   int sub_block_in_width = (block_size >> 1);
-  uint16_t pixel_to_hash[4];
+  DECLARE_ALIGNED(8, uint16_t, pixel_to_hash[4]);
   for (int y_pos = 0; y_pos < block_size; y_pos += 2) {
     for (int x_pos = 0; x_pos < block_size; x_pos += 2) {
       int pos = (y_pos >> 1) * sub_block_in_width + (x_pos >> 1);
       get_pixels_in_1D_short_array_by_block_2x2(y_src + y_pos * stride + x_pos,
                                                 stride, pixel_to_hash);
       assert(pos < AVM_BUFFER_SIZE_FOR_BLOCK_HASH);
-      buf_1[0][pos] = av2_get_crc_value(calc_1, (uint8_t *)pixel_to_hash,
-                                        sizeof(pixel_to_hash));
-      buf_2[0][pos] = av2_get_crc_value(calc_2, (uint8_t *)pixel_to_hash,
-                                        sizeof(pixel_to_hash));
+      buf_1[0][pos] = av2_get_crc24_8bytes(calc_1, pixel_to_hash);
+      buf_2[0][pos] = av2_get_crc24_8bytes(calc_2, pixel_to_hash);
     }
   }
 
@@ -342,7 +373,7 @@ void av2_get_block_hash_value(IntraBCHashInfo *intrabc_hash_info,
   int dst_idx = 0;
 
   // 4x4 subblock hash values to current block hash values
-  uint32_t to_hash[4];
+  DECLARE_ALIGNED(8, uint32_t, to_hash[4]);
   for (int sub_width = 4; sub_width <= block_size; sub_width *= 2) {
     src_idx = 1 - src_idx;
     dst_idx = 1 - dst_idx;
@@ -361,15 +392,13 @@ void av2_get_block_hash_value(IntraBCHashInfo *intrabc_hash_info,
         to_hash[2] = buf_1[src_idx][srcPos + src_sub_block_in_width];
         to_hash[3] = buf_1[src_idx][srcPos + src_sub_block_in_width + 1];
 
-        buf_1[dst_idx][dst_pos] =
-            av2_get_crc_value(calc_1, (uint8_t *)to_hash, sizeof(to_hash));
+        buf_1[dst_idx][dst_pos] = av2_get_crc24_16bytes(calc_1, to_hash);
 
         to_hash[0] = buf_2[src_idx][srcPos];
         to_hash[1] = buf_2[src_idx][srcPos + 1];
         to_hash[2] = buf_2[src_idx][srcPos + src_sub_block_in_width];
         to_hash[3] = buf_2[src_idx][srcPos + src_sub_block_in_width + 1];
-        buf_2[dst_idx][dst_pos] =
-            av2_get_crc_value(calc_2, (uint8_t *)to_hash, sizeof(to_hash));
+        buf_2[dst_idx][dst_pos] = av2_get_crc24_16bytes(calc_2, to_hash);
         dst_pos++;
       }
     }
