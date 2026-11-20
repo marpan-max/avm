@@ -199,6 +199,12 @@ void av2_cyclic_reset_segment_skip(const AV2_COMP *cpi, MACROBLOCK *const x,
     }
   }
   av2_init_plane_quantizers(cpi, x, mbmi->segment_id);
+  const int seg_q =
+      av2_get_qindex(&cm->seg, mbmi->segment_id, cm->quant_params.base_qindex,
+                     cm->seq_params.bit_depth);
+  const int q_rd = clamp(seg_q + cm->quant_params.y_dc_delta_q, 0,
+                         MAXQ_FOR_GIVEN_BIT_DEPTH(cm->seq_params.bit_depth));
+  x->rdmult = av2_compute_rd_mult(cpi, q_rd);
   if (xd->tree_type == LUMA_PART) {
     const int mis = cm->mi_params.mi_stride;
     for (int y = 0; y < bh; y++) {
@@ -297,6 +303,12 @@ void av2_cyclic_refresh_update_segment(const AV2_COMP *cpi, MACROBLOCK *const x,
   }
 
   av2_init_plane_quantizers(cpi, x, mbmi->segment_id);
+  const int seg_q =
+      av2_get_qindex(&cm->seg, mbmi->segment_id, cm->quant_params.base_qindex,
+                     cm->seq_params.bit_depth);
+  const int q_rd = clamp(seg_q + cm->quant_params.y_dc_delta_q, 0,
+                         MAXQ_FOR_GIVEN_BIT_DEPTH(cm->seq_params.bit_depth));
+  x->rdmult = av2_compute_rd_mult(cpi, q_rd);
 }
 
 void av2_cyclic_refresh_postencode(AV2_COMP *const cpi) {
@@ -604,7 +616,7 @@ void av2_cyclic_refresh_update_parameters(AV2_COMP *const cpi,
           ? 1
           : 0;
   cr->motion_thresh = 32;
-  cr->rate_boost_fac = is_screen_content ? 10 : 15;
+  cr->rate_boost_fac = 10;
 
   // Use larger delta-qp (increase rate_ratio_qdelta) for first few (~4)
   // periods of the refresh cycle after a key frame or scene change.

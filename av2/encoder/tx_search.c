@@ -3448,7 +3448,12 @@ static void select_tx_partition_type(
       continue;
     }
 
-    if (cpi->sf.tx_sf.prune_tx_part_stationarity && type != TX_PARTITION_NONE) {
+    const bool bypass_rt_tx_stat =
+        cpi->oxcf.mode == REALTIME && cpi->speed >= 6 &&
+        !cpi->is_screen_content_type && !frame_is_intra_only(&cpi->common) &&
+        x->source_sad_level >= kLowSad;
+    if (cpi->sf.tx_sf.prune_tx_part_stationarity && !bypass_rt_tx_stat &&
+        type != TX_PARTITION_NONE) {
       if (!stationarity_valid) {
         const int margin = (cpi->oxcf.mode == GOOD && cpi->oxcf.speed >= 5)
                                ? 1

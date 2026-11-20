@@ -1279,17 +1279,17 @@ static void set_rt_speed_features_framesize_dependent(AV2_COMP *const cpi,
   const AV2_COMMON *const cm = &cpi->common;
   if (speed >= 6) {
     sf->rd_sf.optimize_coefficients = NO_TRELLIS_OPT;
+    if (!cpi->is_screen_content_type &&
+        cpi->oxcf.algo_cfg.enable_trellis_quant &&
+        !is_lossless_requested(&cpi->oxcf.rc_cfg)) {
+      sf->rd_sf.optimize_coefficients = FINAL_PASS_TRELLIS_OPT;
+    }
     sf->tx_sf.prune_tx_part_stationarity = true;
     sf->mv_sf.subpel_iters_per_step = 1;
     sf->mv_sf.newmv_drl_search_limit = 1;
     sf->mv_sf.subpel_search_method = SUBPEL_TREE_PRUNED_MORE;
     if (cm->width * cm->height < 640 * 360) {
       const uint64_t frame_sad = cpi->rc.frame_source_sad;
-      if (cpi->oxcf.algo_cfg.enable_trellis_quant &&
-          cpi->oxcf.q_cfg.aq_mode == NO_AQ &&
-          !is_lossless_requested(&cpi->oxcf.rc_cfg)) {
-        sf->rd_sf.optimize_coefficients = FINAL_PASS_TRELLIS_OPT;
-      }
       sf->tx_sf.prune_tx_part_stationarity = false;
       if (frame_sad > 10000) {
         sf->mv_sf.subpel_iters_per_step = 2;
